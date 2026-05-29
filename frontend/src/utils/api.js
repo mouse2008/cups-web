@@ -19,6 +19,26 @@ export async function readError(resp) {
   }
 }
 
+async function parseJSONResponse(resp) {
+  if (resp.status === 204) {
+    return null
+  }
+
+  const contentType = resp.headers.get('content-type') || ''
+  if (!contentType.includes('application/json')) {
+    return null
+  }
+
+  return resp.json()
+}
+
+async function toAPIError(resp) {
+  const error = new Error(await readError(resp))
+  error.status = resp.status
+  error.response = resp
+  return error
+}
+
 // 封装 fetch，自动附加 credentials 和 CSRF token，统一处理 401
 // onUnauthorized 是一个回调函数，由调用方传入（用于触发登出）
 export async function apiFetch(url, options = {}, onUnauthorized = null) {
@@ -50,4 +70,31 @@ export async function apiFetch(url, options = {}, onUnauthorized = null) {
   }
 
   return resp
+}
+
+export async function apiGetJSON(url, onUnauthorized = null) {
+  const resp = await apiFetch(url, {}, onUnauthorized)
+  if (!resp.ok) {
+    throw await toAPIError(resp)
+  }
+  return parseJSONResponse(resp)
+}
+
+export async function apiSendJSON(url, method, payload = {}, onUnauthorized = null) {
+  const resp = await apiFetch(url, {
+    method,
+    body: JSON.stringify(payload)
+  }, onUnauthorized)
+  if (!resp.ok) {
+    throw await toAPIError(resp)
+  }
+  return parseJSONResponse(resp)
+}
+
+export async function apiDelete(url, onUnauthorized = null) {
+  const resp = await apiFetch(url, { method: 'DELETE' }, onUnauthorized)
+  if (!resp.ok) {
+    throw await toAPIError(resp)
+  }
+  return parseJSONResponse(resp)
 }

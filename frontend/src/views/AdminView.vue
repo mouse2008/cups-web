@@ -10,12 +10,25 @@
         </template>
         <UForm @submit="saveUser" :state="form" class="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div>
-            <UInput v-model="form.username" :disabled="form.protected" placeholder="登录名" :color="formErrors.username ? 'error' : undefined" />
+            <UInput
+              v-model="form.username"
+              :disabled="form.protected || isLDAPEditing"
+              placeholder="登录名"
+              :color="formErrors.username ? 'error' : undefined"
+            />
             <p v-if="formErrors.username" class="text-xs text-error mt-1">{{ formErrors.username }}</p>
           </div>
-          <div>
-            <UInput type="password" v-model="form.password" :placeholder="isEditing ? '留空不修改密码' : '密码'" :color="formErrors.password ? 'error' : undefined" />
+          <div v-if="!isLDAPEditing">
+            <UInput
+              type="password"
+              v-model="form.password"
+              :placeholder="isEditing ? '留空不修改密码' : '密码'"
+              :color="formErrors.password ? 'error' : undefined"
+            />
             <p v-if="formErrors.password" class="text-xs text-error mt-1">{{ formErrors.password }}</p>
+          </div>
+          <div v-else class="rounded-lg border border-default bg-muted/40 px-3 py-2 text-sm text-muted">
+            LDAP 用户密码需在目录服务中维护，后台不提供修改。
           </div>
           <USelect
             v-model="form.role"
@@ -38,10 +51,29 @@
 
         <div class="overflow-x-auto mt-4">
           <UTable :columns="userColumns" :data="users">
+            <template #authSource-cell="{ row }">
+              <div class="space-y-1">
+                <UBadge :color="authSourceColor(row.original.authSource)" variant="subtle" size="xs">
+                  {{ authSourceLabel(row.original.authSource) }}
+                </UBadge>
+                <p v-if="row.original.authSource === 'ldap'" class="text-xs text-muted">
+                  {{ row.original.ldapPresent ? '目录中存在' : '目录中缺失' }}
+                </p>
+              </div>
+            </template>
             <template #actions-cell="{ row }">
               <div class="flex gap-2">
                 <UButton size="sm" variant="ghost" icon="i-lucide-pencil" @click="editUser(row.original)">编辑</UButton>
-                <UButton size="sm" variant="outline" color="error" icon="i-lucide-trash-2" :disabled="row.original.username === 'admin'" @click="confirmDelete(row.original)">删除</UButton>
+                <UButton
+                  size="sm"
+                  variant="outline"
+                  color="error"
+                  icon="i-lucide-trash-2"
+                  :disabled="row.original.username === 'admin' || row.original.authSource === 'ldap'"
+                  @click="confirmDelete(row.original)"
+                >
+                  删除
+                </UButton>
               </div>
             </template>
           </UTable>
@@ -83,11 +115,120 @@
           <label class="block text-sm font-medium mb-1">自动清理天数</label>
           <UInput type="number" step="1" v-model="settings.retentionDays" placeholder="例如 30" />
         </div>
-        <div class="flex items-end">
-          <UButton color="primary" @click="saveSettings" icon="i-lucide-save" :loading="savingSettings" :disabled="savingSettings">保存设置</UButton>
-        </div>
       </div>
       <div class="text-sm text-muted mt-2">自动清理会删除打印记录与文件，并压缩数据库。</div>
+
+      <div class="border-t border-default mt-5 pt-5 space-y-4">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h3 class="text-base font-semibold">LDAP 设置</h3>
+            <p class="text-sm text-muted mt-1">配置目录登录、定时同步和用户资料字段映射。</p>
+          </div>
+          <label class="inline-flex items-center gap-2 text-sm font-medium">
+            <UCheckbox :model-value="settings.ldap.enabled" @update:model-value="settings.ldap.enabled = !!$event" />
+            <span>启用 LDAP</span>
+          </label>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium mb-1">LDAP URL</label>
+            <UInput v-model="settings.ldap.url" placeholder="ldap://ldap.example.com:389" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">Base DN</label>
+            <UInput v-model="settings.ldap.baseDn" placeholder="dc=example,dc=com" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">Bind DN</label>
+            <UInput v-model="settings.ldap.bindDn" placeholder="cn=service,dc=example,dc=com" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">Bind Password</label>
+            <UInput
+              type="password"
+              v-model="settings.ldap.bindPassword"
+              :placeholder="settings.ldap.hasBindPassword ? '留空保持当前密码' : '输入绑定密码'"
+            />
+            <p class="text-xs text-muted mt-1">
+              {{ settings.ldap.hasBindPassword ? '服务端已保存绑定密码，留空不会覆盖。' : '当前未保存绑定密码。' }}
+            </p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">User Filter</label>
+            <UInput v-model="settings.ldap.userFilter" placeholder="(objectClass=person)" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">Login Attr</label>
+            <UInput v-model="settings.ldap.loginAttr" placeholder="uid" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">Display Name Attr</label>
+            <UInput v-model="settings.ldap.displayNameAttr" placeholder="cn" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">Email Attr</label>
+            <UInput v-model="settings.ldap.emailAttr" placeholder="mail" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">Phone Attr</label>
+            <UInput v-model="settings.ldap.phoneAttr" placeholder="telephoneNumber" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">同步间隔（分钟）</label>
+            <UInput type="number" step="1" min="1" v-model="settings.ldap.syncIntervalMinutes" placeholder="60" />
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_auto] gap-3 items-start">
+          <div class="rounded-xl border border-default bg-muted/30 p-4 space-y-3">
+            <div class="flex items-center gap-2">
+              <span class="text-sm font-medium">同步状态</span>
+              <UBadge :color="ldapSyncStatusColor(settings.ldapSyncStatus.lastStatus)" variant="subtle" size="xs">
+                {{ ldapSyncStatusLabel(settings.ldapSyncStatus.lastStatus) }}
+              </UBadge>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
+              <div>
+                <div class="text-muted">最近开始</div>
+                <div>{{ formatDateTime(settings.ldapSyncStatus.lastStartedAt) }}</div>
+              </div>
+              <div>
+                <div class="text-muted">最近完成</div>
+                <div>{{ formatDateTime(settings.ldapSyncStatus.lastFinishedAt) }}</div>
+              </div>
+              <div>
+                <div class="text-muted">最近同步新增/更新</div>
+                <div>{{ settings.ldapSyncStatus.lastCount || 0 }}</div>
+              </div>
+              <div>
+                <div class="text-muted">摘要</div>
+                <div>{{ settings.ldapSyncStatus.lastMessage || '暂无同步记录' }}</div>
+              </div>
+            </div>
+          </div>
+          <div class="flex gap-2">
+            <UButton
+              variant="outline"
+              icon="i-lucide-refresh-cw"
+              :loading="syncingLDAP"
+              :disabled="syncingLDAP || savingSettings"
+              @click="syncLDAP"
+            >
+              立即同步
+            </UButton>
+            <UButton
+              color="primary"
+              icon="i-lucide-save"
+              :loading="savingSettings"
+              :disabled="savingSettings || syncingLDAP"
+              @click="saveSettings"
+            >
+              保存设置
+            </UButton>
+          </div>
+        </div>
+      </div>
     </UCard>
 
     <UModal v-model:open="showDeleteModal">
@@ -108,34 +249,27 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { getCSRF, readError } from '../utils/api'
+import { apiDelete, apiGetJSON, apiSendJSON } from '../utils/api'
 
 const toast = useToast()
 const emit = defineEmits(['logout'])
 
 const users = ref([])
-const form = ref({
-  id: null,
-  username: '',
-  password: '',
-  role: 'user',
-  protected: false,
-  contactName: '',
-  phone: '',
-  email: ''
-})
+const form = ref(createEmptyUserForm())
 const printFilters = ref({ username: '', start: '', end: '' })
 const printRecords = ref([])
-const settings = ref({ retentionDays: '' })
+const settings = ref(createDefaultSettings())
 
 const savingUser = ref(false)
 const savingSettings = ref(false)
+const syncingLDAP = ref(false)
 const deletingUserId = ref(null)
 const pendingDeleteUser = ref(null)
 const showDeleteModal = ref(false)
 const formErrors = ref({})
 
 const isEditing = computed(() => !!form.value.id)
+const isLDAPEditing = computed(() => isEditing.value && form.value.authSource === 'ldap')
 
 const roleItems = [
   { label: '普通用户', value: 'user' },
@@ -145,6 +279,7 @@ const roleItems = [
 const userColumns = [
   { accessorKey: 'id', header: 'ID' },
   { accessorKey: 'username', header: '登录名' },
+  { accessorKey: 'authSource', header: '来源' },
   { accessorKey: 'role', header: '角色' },
   { accessorKey: 'contactName', header: '联系人' },
   { accessorKey: 'phone', header: '电话' },
@@ -161,6 +296,100 @@ const printColumns = [
   { id: 'download', header: '下载' }
 ]
 
+function createEmptyUserForm() {
+  return {
+    id: null,
+    username: '',
+    password: '',
+    role: 'user',
+    protected: false,
+    authSource: 'local',
+    contactName: '',
+    phone: '',
+    email: ''
+  }
+}
+
+function createDefaultSettings() {
+  return {
+    retentionDays: '0',
+    ldap: {
+      enabled: false,
+      url: '',
+      bindDn: '',
+      bindPassword: '',
+      hasBindPassword: false,
+      baseDn: '',
+      userFilter: '(objectClass=person)',
+      loginAttr: 'uid',
+      displayNameAttr: 'cn',
+      emailAttr: 'mail',
+      phoneAttr: 'telephoneNumber',
+      syncIntervalMinutes: '60'
+    },
+    ldapSyncStatus: {
+      lastStartedAt: '',
+      lastFinishedAt: '',
+      lastStatus: '',
+      lastMessage: '',
+      lastCount: 0
+    }
+  }
+}
+
+function authSourceLabel(source) {
+  return source === 'ldap' ? 'LDAP' : '本地'
+}
+
+function authSourceColor(source) {
+  return source === 'ldap' ? 'primary' : 'neutral'
+}
+
+function ldapSyncStatusLabel(status) {
+  switch (status) {
+    case 'running':
+      return '同步中'
+    case 'success':
+      return '成功'
+    case 'error':
+      return '失败'
+    default:
+      return '未执行'
+  }
+}
+
+function ldapSyncStatusColor(status) {
+  switch (status) {
+    case 'running':
+      return 'warning'
+    case 'success':
+      return 'success'
+    case 'error':
+      return 'error'
+    default:
+      return 'neutral'
+  }
+}
+
+function formatDateTime(value) {
+  if (!value) {
+    return '暂无'
+  }
+
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return value
+  }
+
+  return date.toLocaleString('zh-CN', {
+    hour12: false
+  })
+}
+
+function handleUnauthorized() {
+  emit('logout')
+}
+
 function validateForm() {
   formErrors.value = {}
   if (!form.value.username.trim()) {
@@ -176,16 +405,7 @@ function validateForm() {
 }
 
 function resetForm() {
-  form.value = {
-    id: null,
-    username: '',
-    password: '',
-    role: 'user',
-    protected: false,
-    contactName: '',
-    phone: '',
-    email: ''
-  }
+  form.value = createEmptyUserForm()
   formErrors.value = {}
 }
 
@@ -195,7 +415,8 @@ function editUser(user) {
     username: user.username,
     password: '',
     role: user.role,
-    protected: user.username === 'admin',
+    protected: user.protected || user.username === 'admin',
+    authSource: user.authSource || 'local',
     contactName: user.contactName || '',
     phone: user.phone || '',
     email: user.email || ''
@@ -204,12 +425,13 @@ function editUser(user) {
 }
 
 async function loadUsers() {
-  const resp = await fetch('/api/admin/users', { credentials: 'include' })
-  if (!resp.ok) {
-    if (resp.status === 401) emit('logout')
-    return
+  try {
+    users.value = await apiGetJSON('/api/admin/users', handleUnauthorized) || []
+  } catch (error) {
+    if (error.status !== 401) {
+      toast.add({ title: '加载失败', description: error.message, color: 'error', icon: 'i-lucide-x-circle' })
+    }
   }
-  users.value = await resp.json()
 }
 
 async function saveUser() {
@@ -226,30 +448,23 @@ async function saveUser() {
     }
     const url = isEditing.value ? `/api/admin/users/${form.value.id}` : '/api/admin/users'
     const method = isEditing.value ? 'PUT' : 'POST'
-    const resp = await fetch(url, {
-      method,
-      credentials: 'include',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-CSRF-Token': getCSRF()
-      },
-      body: JSON.stringify(payload)
-    })
-    if (!resp.ok) {
-      const msg = await readError(resp)
-      toast.add({ title: '保存失败', description: msg, color: 'error', icon: 'i-lucide-x-circle' })
-      if (resp.status === 401) emit('logout')
-      return
-    }
+    await apiSendJSON(url, method, payload, handleUnauthorized)
     toast.add({ title: isEditing.value ? '更新成功' : '创建成功', description: `用户 ${form.value.username} 已保存`, color: 'success', icon: 'i-lucide-check-circle' })
     await loadUsers()
     resetForm()
+  } catch (error) {
+    if (error.status !== 401) {
+      toast.add({ title: '保存失败', description: error.message, color: 'error', icon: 'i-lucide-x-circle' })
+    }
   } finally {
     savingUser.value = false
   }
 }
 
 function confirmDelete(user) {
+  if (user.username === 'admin' || user.authSource === 'ldap') {
+    return
+  }
   pendingDeleteUser.value = user
   showDeleteModal.value = true
 }
@@ -259,19 +474,13 @@ async function executeDelete() {
   if (!user) return
   deletingUserId.value = user.id
   try {
-    const resp = await fetch(`/api/admin/users/${user.id}`, {
-      method: 'DELETE',
-      credentials: 'include',
-      headers: { 'X-CSRF-Token': getCSRF() }
-    })
-    if (!resp.ok) {
-      const msg = await readError(resp)
-      toast.add({ title: '删除失败', description: msg, color: 'error', icon: 'i-lucide-x-circle' })
-      if (resp.status === 401) emit('logout')
-      return
-    }
+    await apiDelete(`/api/admin/users/${user.id}`, handleUnauthorized)
     toast.add({ title: '删除成功', description: `用户 ${user.username} 已删除`, color: 'success', icon: 'i-lucide-check-circle' })
     await loadUsers()
+  } catch (error) {
+    if (error.status !== 401) {
+      toast.add({ title: '删除失败', description: error.message, color: 'error', icon: 'i-lucide-x-circle' })
+    }
   } finally {
     deletingUserId.value = null
     showDeleteModal.value = false
@@ -288,49 +497,108 @@ async function loadPrintRecords() {
   if (printFilters.value.username) params.set('username', printFilters.value.username)
   if (printFilters.value.start) params.set('start', printFilters.value.start)
   if (printFilters.value.end) params.set('end', printFilters.value.end)
-  const resp = await fetch(`/api/admin/print-records?${params.toString()}`, { credentials: 'include' })
-  if (!resp.ok) {
-    if (resp.status === 401) emit('logout')
-    return
+  const query = params.toString()
+  const url = query ? `/api/admin/print-records?${query}` : '/api/admin/print-records'
+  try {
+    printRecords.value = await apiGetJSON(url, handleUnauthorized) || []
+  } catch (error) {
+    if (error.status !== 401) {
+      toast.add({ title: '加载失败', description: error.message, color: 'error', icon: 'i-lucide-x-circle' })
+    }
   }
-  printRecords.value = await resp.json()
 }
 
 async function loadSettings() {
-  const resp = await fetch('/api/admin/settings', { credentials: 'include' })
-  if (!resp.ok) {
-    if (resp.status === 401) emit('logout')
-    return
+  try {
+    const data = await apiGetJSON('/api/admin/settings', handleUnauthorized)
+    settings.value = {
+      retentionDays: String(data?.retentionDays ?? 0),
+      ldap: {
+        enabled: !!data?.ldap?.enabled,
+        url: data?.ldap?.url || '',
+        bindDn: data?.ldap?.bindDn || '',
+        bindPassword: '',
+        hasBindPassword: !!data?.ldap?.hasBindPassword,
+        baseDn: data?.ldap?.baseDn || '',
+        userFilter: data?.ldap?.userFilter || '(objectClass=person)',
+        loginAttr: data?.ldap?.loginAttr || 'uid',
+        displayNameAttr: data?.ldap?.displayNameAttr || 'cn',
+        emailAttr: data?.ldap?.emailAttr || 'mail',
+        phoneAttr: data?.ldap?.phoneAttr || 'telephoneNumber',
+        syncIntervalMinutes: String(data?.ldap?.syncIntervalMinutes ?? 60)
+      },
+      ldapSyncStatus: {
+        lastStartedAt: data?.ldapSyncStatus?.lastStartedAt || '',
+        lastFinishedAt: data?.ldapSyncStatus?.lastFinishedAt || '',
+        lastStatus: data?.ldapSyncStatus?.lastStatus || '',
+        lastMessage: data?.ldapSyncStatus?.lastMessage || '',
+        lastCount: data?.ldapSyncStatus?.lastCount || 0
+      }
+    }
+  } catch (error) {
+    if (error.status !== 401) {
+      toast.add({ title: '加载失败', description: error.message, color: 'error', icon: 'i-lucide-x-circle' })
+    }
   }
-  const data = await resp.json()
-  settings.value.retentionDays = String(data.retentionDays || 0)
 }
 
 async function saveSettings() {
   savingSettings.value = true
   try {
+    const retentionDays = Number.parseInt(settings.value.retentionDays || '0', 10)
+    const syncIntervalMinutes = Number.parseInt(settings.value.ldap.syncIntervalMinutes || '0', 10)
     const payload = {
-      retentionDays: parseInt(settings.value.retentionDays || '0', 10)
+      retentionDays: Number.isNaN(retentionDays) ? 0 : retentionDays,
+      ldap: {
+        enabled: settings.value.ldap.enabled,
+        url: settings.value.ldap.url,
+        bindDn: settings.value.ldap.bindDn,
+        bindPassword: settings.value.ldap.bindPassword,
+        baseDn: settings.value.ldap.baseDn,
+        userFilter: settings.value.ldap.userFilter,
+        loginAttr: settings.value.ldap.loginAttr,
+        displayNameAttr: settings.value.ldap.displayNameAttr,
+        emailAttr: settings.value.ldap.emailAttr,
+        phoneAttr: settings.value.ldap.phoneAttr,
+        syncIntervalMinutes: Number.isNaN(syncIntervalMinutes) ? 0 : syncIntervalMinutes
+      }
     }
-    const resp = await fetch('/api/admin/settings', {
-      method: 'PUT',
-      credentials: 'include',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-CSRF-Token': getCSRF()
-      },
-      body: JSON.stringify(payload)
-    })
-    if (!resp.ok) {
-      const msg = await readError(resp)
-      toast.add({ title: '保存失败', description: msg, color: 'error', icon: 'i-lucide-x-circle' })
-      if (resp.status === 401) emit('logout')
-      return
-    }
+    await apiSendJSON('/api/admin/settings', 'PUT', payload, handleUnauthorized)
     toast.add({ title: '保存成功', description: '系统设置已更新', color: 'success', icon: 'i-lucide-check-circle' })
     await loadSettings()
+  } catch (error) {
+    if (error.status !== 401) {
+      toast.add({ title: '保存失败', description: error.message, color: 'error', icon: 'i-lucide-x-circle' })
+    }
   } finally {
     savingSettings.value = false
+  }
+}
+
+async function syncLDAP() {
+  syncingLDAP.value = true
+  let shouldRefresh = true
+  try {
+    const data = await apiSendJSON('/api/admin/ldap/sync', 'POST', {}, handleUnauthorized)
+    const report = data?.report || {}
+    toast.add({
+      title: '同步成功',
+      description: `已同步 upserted=${report.upserted || 0} skipped=${report.skipped || 0} missingMarked=${report.missingMarked || 0}`,
+      color: 'success',
+      icon: 'i-lucide-check-circle'
+    })
+  } catch (error) {
+    if (error.status === 401) {
+      shouldRefresh = false
+    } else {
+      toast.add({ title: '同步失败', description: error.message, color: 'error', icon: 'i-lucide-x-circle' })
+    }
+  } finally {
+    syncingLDAP.value = false
+  }
+
+  if (shouldRefresh) {
+    await Promise.allSettled([loadUsers(), loadSettings()])
   }
 }
 
