@@ -64,7 +64,6 @@ type UpsertLDAPUserInput struct {
 	ContactName string
 	Phone       string
 	Email       string
-	DefaultRole string
 }
 
 const userSelectColumns = `
@@ -229,7 +228,7 @@ func TouchLastLogin(ctx context.Context, tx *sql.Tx, id int64) error {
 }
 
 func MarkMissingLDAPUsers(ctx context.Context, tx *sql.Tx, seen map[string]struct{}) (int, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id, ldap_uid
+	rows, err := tx.QueryContext(ctx, `SELECT id, ldap_uid, ldap_dn
 		FROM users
 		WHERE auth_source = ? AND ldap_sync_enabled = 1 AND ldap_present = 1`, authSourceLDAP)
 	if err != nil {
@@ -241,12 +240,14 @@ func MarkMissingLDAPUsers(ctx context.Context, tx *sql.Tx, seen map[string]struc
 	for rows.Next() {
 		var id int64
 		var ldapUID sql.NullString
-		if err := rows.Scan(&id, &ldapUID); err != nil {
+		var ldapDN sql.NullString
+		if err := rows.Scan(&id, &ldapUID, &ldapDN); err != nil {
 			return 0, err
 		}
-		if _, ok := seen[ldapUID.String]; !ok {
-			ids = append(ids, id)
+		if identitySeen(seen, ldapUID.String, ldapDN.String) {
+			continue
 		}
+		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
 		return 0, err
@@ -315,4 +316,16 @@ func nullableStringValue(value string) any {
 		return nil
 	}
 	return value
+}
+
+func identitySeen(seen map[string]struct{}, values ...string) bool {
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			return true
+		}
+	}
+	return false
 }

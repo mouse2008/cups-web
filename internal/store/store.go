@@ -155,6 +155,19 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := addColumnIfMissing(ctx, s.DB, "users", "last_login_at TEXT"); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
+	indexStmts := []string{
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_ldap_uid_unique
+			ON users(ldap_uid)
+			WHERE ldap_uid IS NOT NULL AND ldap_uid <> ''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_ldap_dn_unique
+			ON users(ldap_dn)
+			WHERE ldap_dn IS NOT NULL AND ldap_dn <> ''`,
+	}
+	for _, stmt := range indexStmts {
+		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("migrate: %w", err)
+		}
+	}
 	if err := addColumnIfMissing(ctx, s.DB, "print_jobs", "is_duplex INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}

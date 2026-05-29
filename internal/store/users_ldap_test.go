@@ -4,18 +4,38 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 )
 
-func TestOpen_MigratesLDAPUserColumns(t *testing.T) {
+func TestOpen_HotUpgradeMigratesLDAPUserColumns(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/cups-web.db"
+
+	seedLegacyStore(t, dbPath)
 
 	s, err := Open(ctx, dbPath)
 	if err != nil {
 		t.Fatalf("Open() err = %v", err)
 	}
 	defer s.Close()
+
+	err = s.WithTx(ctx, true, func(tx *sql.Tx) error {
+		user, err := GetUserByUsername(ctx, tx, "legacy-user")
+		if err != nil {
+			return err
+		}
+		if user.AuthSource != authSourceLocal {
+			t.Fatalf("AuthSource = %q, want %q", user.AuthSource, authSourceLocal)
+		}
+		if user.LDAPUID != "" || user.LDAPDN != "" {
+			t.Fatalf("legacy user unexpectedly has LDAP identity fields populated")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("verify legacy user after migration: %v", err)
+	}
 
 	err = s.WithTx(ctx, false, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
@@ -32,6 +52,24 @@ func TestOpen_MigratesLDAPUserColumns(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("expected LDAP columns to exist, got err = %v", err)
+	}
+}
+
+func TestOpen_FailsWhenDuplicateLDAPIdentitiesExist(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/cups-web.db"
+
+	seedStoreWithDuplicateLDAPIdentity(t, dbPath)
+
+	s, err := Open(ctx, dbPath)
+	if s != nil {
+		defer s.Close()
+	}
+	if err == nil {
+		t.Fatalf("Open() err = nil, want duplicate LDAP identity failure")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "unique") {
+		t.Fatalf("Open() err = %v, want unique constraint failure", err)
 	}
 }
 
@@ -52,7 +90,6 @@ func TestUpsertLDAPUser_PreservesLocalRoleAndProfile(t *testing.T) {
 			ContactName: "Alice LDAP",
 			Email:       "alice@example.com",
 			Phone:       "123",
-			DefaultRole: RoleUser,
 		})
 		if err != nil {
 			return err
@@ -77,7 +114,6 @@ func TestUpsertLDAPUser_PreservesLocalRoleAndProfile(t *testing.T) {
 			ContactName: "Alice From LDAP",
 			Email:       "alice-new@example.com",
 			Phone:       "555",
-			DefaultRole: RoleUser,
 		})
 		return err
 	})
@@ -122,10 +158,9 @@ func TestUpsertLDAPUser_CreatesNewUsersWithUserRole(t *testing.T) {
 	var got User
 	err = s.WithTx(ctx, false, func(tx *sql.Tx) error {
 		got, err = UpsertLDAPUser(ctx, tx, UpsertLDAPUserInput{
-			Username:    "bob",
-			LDAPUID:     "bob-uid",
-			LDAPDN:      "cn=bob,dc=example,dc=com",
-			DefaultRole: RoleAdmin,
+			Username: "bob",
+			LDAPUID:  "bob-uid",
+			LDAPDN:   "cn=bob,dc=example,dc=com",
 		})
 		return err
 	})
@@ -160,10 +195,9 @@ func TestUpsertLDAPUser_DoesNotReuseLocalUserByUsername(t *testing.T) {
 		localUserID = localUser.ID
 
 		_, err = UpsertLDAPUser(ctx, tx, UpsertLDAPUserInput{
-			Username:    "carol",
-			LDAPUID:     "carol-uid",
-			LDAPDN:      "cn=carol,dc=example,dc=com",
-			DefaultRole: RoleUser,
+			Username: "carol",
+			LDAPUID:  "carol-uid",
+			LDAPDN:   "cn=carol,dc=example,dc=com",
 		})
 		if err == nil {
 			t.Fatalf("UpsertLDAPUser() err = nil, want unique constraint or similar failure")
@@ -211,21 +245,30 @@ func TestMarkMissingLDAPUsers(t *testing.T) {
 
 	err = s.WithTx(ctx, false, func(tx *sql.Tx) error {
 		presentUser, err := UpsertLDAPUser(ctx, tx, UpsertLDAPUserInput{
-			Username:    "present",
-			LDAPUID:     "present-uid",
-			LDAPDN:      "cn=present,dc=example,dc=com",
-			DefaultRole: RoleUser,
+			Username: "present",
+			LDAPUID:  "present-uid",
+			LDAPDN:   "cn=present,dc=example,dc=com",
 		})
 		if err != nil {
 			return err
 		}
 		presentUserID = presentUser.ID
 
+		dnOnlyUser, err := UpsertLDAPUser(ctx, tx, UpsertLDAPUserInput{
+			Username: "dn-only",
+			LDAPDN:   "cn=dn-only,dc=example,dc=com",
+		})
+		if err != nil {
+			return err
+		}
+		if !dnOnlyUser.LDAPPresent {
+			t.Fatalf("DN-only user should start present")
+		}
+
 		missingUser, err := UpsertLDAPUser(ctx, tx, UpsertLDAPUserInput{
-			Username:    "missing",
-			LDAPUID:     "missing-uid",
-			LDAPDN:      "cn=missing,dc=example,dc=com",
-			DefaultRole: RoleUser,
+			Username: "missing",
+			LDAPUID:  "missing-uid",
+			LDAPDN:   "cn=missing,dc=example,dc=com",
 		})
 		if err != nil {
 			return err
@@ -233,7 +276,8 @@ func TestMarkMissingLDAPUsers(t *testing.T) {
 		missingUserID = missingUser.ID
 
 		markedCount, err = MarkMissingLDAPUsers(ctx, tx, map[string]struct{}{
-			"present-uid": {},
+			"present-uid":                  {},
+			"cn=dn-only,dc=example,dc=com": {},
 		})
 		return err
 	})
@@ -254,6 +298,14 @@ func TestMarkMissingLDAPUsers(t *testing.T) {
 			t.Fatalf("present user marked missing unexpectedly")
 		}
 
+		dnOnlyUser, err := GetUserByUsername(ctx, tx, "dn-only")
+		if err != nil {
+			return err
+		}
+		if !dnOnlyUser.LDAPPresent {
+			t.Fatalf("DN-only user marked missing unexpectedly")
+		}
+
 		missingUser, err := GetUserByID(ctx, tx, missingUserID)
 		if err != nil {
 			return err
@@ -265,5 +317,82 @@ func TestMarkMissingLDAPUsers(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("verify marked users: %v", err)
+	}
+}
+
+func seedLegacyStore(t *testing.T, dbPath string) {
+	t.Helper()
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() err = %v", err)
+	}
+	defer db.Close()
+
+	stmts := []string{
+		`CREATE TABLE users (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			username TEXT NOT NULL UNIQUE,
+			password_hash TEXT NOT NULL,
+			role TEXT NOT NULL,
+			protected INTEGER NOT NULL DEFAULT 0,
+			contact_name TEXT,
+			phone TEXT,
+			email TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`INSERT INTO users (
+			username, password_hash, role, protected, contact_name, phone, email, created_at, updated_at
+		) VALUES ('legacy-user', 'hash', 'user', 0, 'Legacy User', '10086', 'legacy@example.com', '` + nowUTC() + `', '` + nowUTC() + `')`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("seed legacy store stmt %q err = %v", stmt, err)
+		}
+	}
+}
+
+func seedStoreWithDuplicateLDAPIdentity(t *testing.T, dbPath string) {
+	t.Helper()
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() err = %v", err)
+	}
+	defer db.Close()
+
+	now := nowUTC()
+	stmts := []string{
+		`CREATE TABLE users (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			username TEXT NOT NULL UNIQUE,
+			password_hash TEXT NOT NULL,
+			role TEXT NOT NULL,
+			protected INTEGER NOT NULL DEFAULT 0,
+			contact_name TEXT,
+			phone TEXT,
+			email TEXT,
+			auth_source TEXT NOT NULL DEFAULT 'local',
+			ldap_dn TEXT,
+			ldap_uid TEXT,
+			ldap_sync_enabled INTEGER NOT NULL DEFAULT 0,
+			ldap_present INTEGER NOT NULL DEFAULT 1,
+			last_ldap_sync_at TEXT,
+			last_login_at TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`INSERT INTO users (
+			username, password_hash, role, protected, auth_source, ldap_uid, ldap_dn, ldap_sync_enabled, ldap_present, created_at, updated_at
+		) VALUES ('dup-1', '', 'user', 0, 'ldap', 'dup-uid', 'cn=dup-1,dc=example,dc=com', 1, 1, '` + now + `', '` + now + `')`,
+		`INSERT INTO users (
+			username, password_hash, role, protected, auth_source, ldap_uid, ldap_dn, ldap_sync_enabled, ldap_present, created_at, updated_at
+		) VALUES ('dup-2', '', 'user', 0, 'ldap', 'dup-uid', 'cn=dup-2,dc=example,dc=com', 1, 1, '` + now + `', '` + now + `')`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("seed duplicate LDAP identity stmt %q err = %v", stmt, err)
+		}
 	}
 }
