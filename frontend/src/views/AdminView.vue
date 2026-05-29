@@ -577,10 +577,11 @@ async function saveSettings() {
 
 async function syncLDAP() {
   syncingLDAP.value = true
-  let shouldRefresh = true
+  let syncSucceeded = false
   try {
     const data = await apiSendJSON('/api/admin/ldap/sync', 'POST', {}, handleUnauthorized)
     const report = data?.report || {}
+    syncSucceeded = true
     toast.add({
       title: '同步成功',
       description: `已同步 upserted=${report.upserted || 0} skipped=${report.skipped || 0} missingMarked=${report.missingMarked || 0}`,
@@ -588,16 +589,14 @@ async function syncLDAP() {
       icon: 'i-lucide-check-circle'
     })
   } catch (error) {
-    if (error.status === 401) {
-      shouldRefresh = false
-    } else {
+    if (error.status !== 401) {
       toast.add({ title: '同步失败', description: error.message, color: 'error', icon: 'i-lucide-x-circle' })
     }
   } finally {
     syncingLDAP.value = false
   }
 
-  if (shouldRefresh) {
+  if (syncSucceeded) {
     await Promise.allSettled([loadUsers(), loadSettings()])
   }
 }
