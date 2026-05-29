@@ -429,7 +429,7 @@ async function loadUsers() {
     users.value = await apiGetJSON('/api/admin/users', handleUnauthorized) || []
   } catch (error) {
     if (error.status !== 401) {
-      toast.add({ title: '加载失败', description: error.message, color: 'error', icon: 'i-lucide-x-circle' })
+      return
     }
   }
 }
@@ -503,7 +503,7 @@ async function loadPrintRecords() {
     printRecords.value = await apiGetJSON(url, handleUnauthorized) || []
   } catch (error) {
     if (error.status !== 401) {
-      toast.add({ title: '加载失败', description: error.message, color: 'error', icon: 'i-lucide-x-circle' })
+      return
     }
   }
 }
@@ -537,7 +537,7 @@ async function loadSettings() {
     }
   } catch (error) {
     if (error.status !== 401) {
-      toast.add({ title: '加载失败', description: error.message, color: 'error', icon: 'i-lucide-x-circle' })
+      return
     }
   }
 }
