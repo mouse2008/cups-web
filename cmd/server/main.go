@@ -110,6 +110,7 @@ func main() {
 	admin.HandleFunc("/users", adminCreateUserHandler).Methods("POST")
 	admin.HandleFunc("/users/{id:[0-9]+}", adminUpdateUserHandler).Methods("PUT")
 	admin.HandleFunc("/users/{id:[0-9]+}", adminDeleteUserHandler).Methods("DELETE")
+	admin.HandleFunc("/ldap/sync", adminLDAPSyncHandler).Methods("POST")
 	admin.HandleFunc("/print-records", adminPrintRecordsHandler).Methods("GET")
 	admin.HandleFunc("/settings", adminGetSettingsHandler).Methods("GET")
 	admin.HandleFunc("/settings", adminUpdateSettingsHandler).Methods("PUT")
