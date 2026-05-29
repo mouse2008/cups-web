@@ -31,5 +31,5 @@ vendor/
 ofd-converter/target/
 
 .aone_copilot/
-
+/.worktrees/
 
