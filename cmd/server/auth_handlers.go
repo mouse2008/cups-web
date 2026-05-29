@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -9,10 +10,13 @@ import (
 	"net/http"
 
 	"cups-web/internal/auth"
+	ldapauth "cups-web/internal/ldap"
 	"cups-web/internal/store"
 
 	"golang.org/x/crypto/bcrypt"
 )
+
+var errInvalidCredentials = errors.New("invalid credentials")
 
 type loginReq struct {
 	Username string `json:"username"`
@@ -49,26 +53,13 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var user store.User
-	err := appStore.WithTx(r.Context(), false, func(tx *sql.Tx) error {
-		found, err := store.GetUserByUsername(r.Context(), tx, req.Username)
-		if err != nil {
-			return err
-		}
-		user = found
-		return nil
-	})
+	user, err := authenticateUser(r.Context(), req.Username, req.Password)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, errInvalidCredentials) {
 			writeJSONError(w, http.StatusUnauthorized, "invalid credentials")
 			return
 		}
 		writeJSONError(w, http.StatusInternalServerError, "login failed")
-		return
-	}
-
-	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)) != nil {
-		writeJSONError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
 
@@ -90,6 +81,62 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, csrfCookie)
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func authenticateUser(ctx context.Context, username string, password string) (store.User, error) {
+	localUser, localErr := findLocalUser(ctx, username)
+	if localErr != nil {
+		return store.User{}, localErr
+	}
+
+	if localUser.ID != 0 && localUser.AuthSource == "local" {
+		if bcrypt.CompareHashAndPassword([]byte(localUser.PasswordHash), []byte(password)) != nil {
+			return store.User{}, errInvalidCredentials
+		}
+		if err := appStore.WithTx(ctx, false, func(tx *sql.Tx) error {
+			return store.TouchLastLogin(ctx, tx, localUser.ID)
+		}); err != nil {
+			return store.User{}, err
+		}
+		localUser, err := findLocalUser(ctx, username)
+		if err != nil {
+			return store.User{}, err
+		}
+		return localUser, nil
+	}
+
+	cfg, err := ldapauth.LoadConfig(ctx, appStore)
+	if err != nil {
+		return store.User{}, errInvalidCredentials
+	}
+	if !cfg.Enabled {
+		return store.User{}, errInvalidCredentials
+	}
+	service := currentLDAPService()
+	if service == nil {
+		return store.User{}, errInvalidCredentials
+	}
+	user, err := service.AuthenticateOrProvision(ctx, cfg, username, password)
+	if err != nil {
+		return store.User{}, errInvalidCredentials
+	}
+	return user, nil
+}
+
+func findLocalUser(ctx context.Context, username string) (store.User, error) {
+	var user store.User
+	err := appStore.WithTx(ctx, true, func(tx *sql.Tx) error {
+		found, err := store.GetUserByUsername(ctx, tx, username)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		user = found
+		return nil
+	})
+	return user, err
 }
 
 func LogoutHandler(w http.ResponseWriter, r *http.Request) {
