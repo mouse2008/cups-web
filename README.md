@@ -217,6 +217,126 @@ docker-compose up -d --build
 
 > ⚠️ **首次登录请立即修改默认密码**。
 
+### 6. 服务器部署步骤清单
+
+下面这份清单适合直接在 Linux 服务器上执行，分为首次部署、旧版升级、日常更新三种场景。
+
+#### 首次部署
+
+1. 安装基础环境，确保服务器已经安装 `git`、`docker` 和 Docker Compose
+2. 拉取你的最新代码：
+
+```bash
+git clone -b codex/ldap-user-management git@github.com:mouse2008/cups-web.git
+cd cups-web
+```
+
+3. 创建 `.env`：
+
+```bash
+cat > .env <<'EOF'
+CUPSADMIN=admin
+CUPSPASSWORD=改成你自己的强密码
+EOF
+```
+
+4. 构建并启动服务：
+
+```bash
+docker compose up -d --build
+```
+
+如果你的环境还是旧版 Compose，也可以使用：
+
+```bash
+docker-compose up -d --build
+```
+
+5. 检查容器状态：
+
+```bash
+docker compose ps
+```
+
+6. 打开服务：
+
+- Web 管理页面：`http://服务器IP:1180`
+- CUPS 管理页面：`http://服务器IP:631`
+
+7. 首次登录 Web 后台，默认账号密码为 `admin/admin`，登录后请立即修改密码
+8. 进入 CUPS 后台，使用 `.env` 中的 `CUPSADMIN` 和 `CUPSPASSWORD` 登录并添加打印机
+9. 添加打印机后，务必将打印机设为 **Shared（共享）**，否则 Web 端无法发现该打印机
+10. 如需启用 LDAP，进入 Web 后台的 LDAP 管理页，填写 LDAP 服务器参数，保存后先执行一次手动同步再测试登录
+
+#### 从旧版升级
+
+1. 先备份数据目录：
+
+```bash
+tar -czf cups-web-backup-$(date +%F-%H%M%S).tar.gz .data .uploads .etc
+```
+
+2. 进入原有项目目录：
+
+```bash
+cd cups-web
+```
+
+3. 拉取并切换到最新代码：
+
+```bash
+git fetch origin
+git checkout codex/ldap-user-management
+git pull
+```
+
+4. 重新构建并启动：
+
+```bash
+docker compose up -d --build
+```
+
+如果你的环境还是旧版 Compose，也可以使用：
+
+```bash
+docker-compose up -d --build
+```
+
+5. 检查升级结果：
+
+```bash
+docker compose ps
+docker compose logs -f web
+```
+
+6. 登录后台确认原有数据仍然存在，并手动执行一次 LDAP 同步，确认目录连接正常
+
+#### 日常更新
+
+后续每次更新服务器代码，标准流程如下：
+
+```bash
+cd cups-web
+git pull
+docker compose up -d --build
+```
+
+如果你的环境还是旧版 Compose，也可以使用：
+
+```bash
+cd cups-web
+git pull
+docker-compose up -d --build
+```
+
+#### 注意事项
+
+- `web` 服务现在默认从当前源码构建，不再使用远程 `hanxi/cups-web:master` 镜像，因此 LDAP 等最新改动会进入容器
+- 不要随意删除 `./.data`、`./.uploads`、`./.etc` 这三个目录
+- 如果服务器启用了防火墙，至少放行 `1180` 端口；是否开放 `631` 取决于你是否需要远程访问 CUPS 后台
+- 首次构建会比较慢，因为需要在服务器上构建前端和后端镜像
+- LDAP 配置在 Web 后台完成，不需要额外写入 `.env`
+
 ---
 
 ## 二进制部署
