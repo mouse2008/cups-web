@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -156,6 +157,49 @@ func TestLoginHandler_ProvisionsLDAPUserOnFirstSuccessfulLogin(t *testing.T) {
 	})
 }
 
+func TestLoginHandler_ExistingLDAPBackedUserStillAuthenticatesViaLDAP(t *testing.T) {
+	ctx := context.Background()
+	s := setupAuthHandlerTest(t, ctx)
+
+	enableLDAPConfig(t, ctx, s)
+	seedLDAPBackedUser(t, ctx, s, "alice", "alice-uid", "cn=alice,dc=example,dc=com")
+
+	client := &fakeLDAPClient{
+		searchUserResult: []ldap.DirectoryUser{{
+			Username:    "alice",
+			UID:         "alice-uid",
+			DN:          "cn=alice,dc=example,dc=com",
+			DisplayName: "Alice LDAP",
+			Email:       "alice@example.com",
+			Phone:       "123456",
+		}},
+	}
+	ldapService = ldap.NewService(s, client)
+
+	rec := postLogin(t, "alice", "ldap-pass")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("LoginHandler status = %d, body = %s, want %d", rec.Code, rec.Body.String(), http.StatusOK)
+	}
+	if client.searchUserCalls != 1 {
+		t.Fatalf("SearchUser calls = %d, want 1", client.searchUserCalls)
+	}
+	if client.bindUserCalls != 1 {
+		t.Fatalf("BindUser calls = %d, want 1", client.bindUserCalls)
+	}
+
+	assertUserByUsername(t, ctx, s, "alice", func(got store.User) {
+		if got.AuthSource != "ldap" {
+			t.Fatalf("AuthSource = %q, want ldap", got.AuthSource)
+		}
+		if got.LDAPUID != "alice-uid" {
+			t.Fatalf("LDAPUID = %q, want alice-uid", got.LDAPUID)
+		}
+		if got.LastLoginAt == "" {
+			t.Fatalf("LastLoginAt = empty, want timestamp after LDAP login")
+		}
+	})
+}
+
 func TestLoginHandler_RejectsLDAPUserWhenDirectoryMatchIsAmbiguous(t *testing.T) {
 	ctx := context.Background()
 	s := setupAuthHandlerTest(t, ctx)
@@ -188,6 +232,35 @@ func TestLoginHandler_RejectsLDAPUserWhenDirectoryMatchIsAmbiguous(t *testing.T)
 		return nil
 	}); err != nil {
 		t.Fatalf("verify no LDAP user row: %v", err)
+	}
+}
+
+func TestLoginHandler_ReturnsServerErrorOnLDAPOperationalFailure(t *testing.T) {
+	ctx := context.Background()
+	s := setupAuthHandlerTest(t, ctx)
+
+	enableLDAPConfig(t, ctx, s)
+	client := &fakeLDAPClient{
+		searchUserResult: []ldap.DirectoryUser{{
+			Username: "alice",
+			UID:      "alice-uid",
+			DN:       "cn=alice,dc=example,dc=com",
+		}},
+		bindErr: errors.New("ldap unavailable"),
+	}
+	ldapService = ldap.NewService(s, client)
+
+	rec := postLogin(t, "alice", "ldap-pass")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("LoginHandler status = %d, body = %s, want %d", rec.Code, rec.Body.String(), http.StatusInternalServerError)
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if body["error"] != "login failed" {
+		t.Fatalf("error response = %q, want %q", body["error"], "login failed")
 	}
 }
 
@@ -232,6 +305,29 @@ func seedLocalUser(t *testing.T, ctx context.Context, s *store.Store, username s
 		return err
 	}); err != nil {
 		t.Fatalf("seed local user: %v", err)
+	}
+	return user
+}
+
+func seedLDAPBackedUser(t *testing.T, ctx context.Context, s *store.Store, username string, ldapUID string, ldapDN string) store.User {
+	t.Helper()
+
+	var user store.User
+	if err := s.WithTx(ctx, false, func(tx *sql.Tx) error {
+		created, err := store.CreateUser(ctx, tx, store.CreateUserInput{
+			Username:        username,
+			PasswordHash:    "",
+			Role:            store.RoleUser,
+			AuthSource:      "ldap",
+			LDAPUID:         ldapUID,
+			LDAPDN:          ldapDN,
+			LDAPSyncEnabled: true,
+			LDAPPresent:     true,
+		})
+		user = created
+		return err
+	}); err != nil {
+		t.Fatalf("seed LDAP-backed user: %v", err)
 	}
 	return user
 }

@@ -107,18 +107,22 @@ func authenticateUser(ctx context.Context, username string, password string) (st
 
 	cfg, err := ldapauth.LoadConfig(ctx, appStore)
 	if err != nil {
-		return store.User{}, errInvalidCredentials
+		return store.User{}, err
 	}
 	if !cfg.Enabled {
 		return store.User{}, errInvalidCredentials
 	}
 	service := currentLDAPService()
 	if service == nil {
-		return store.User{}, errInvalidCredentials
+		return store.User{}, errors.New("ldap service not initialized")
 	}
 	user, err := service.AuthenticateOrProvision(ctx, cfg, username, password)
 	if err != nil {
-		return store.User{}, errInvalidCredentials
+		if errors.Is(err, ldapauth.ErrInvalidCredentials) ||
+			errors.Is(err, ldapauth.ErrAmbiguousSearchResult) {
+			return store.User{}, errInvalidCredentials
+		}
+		return store.User{}, err
 	}
 	return user, nil
 }
