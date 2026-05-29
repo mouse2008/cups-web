@@ -384,13 +384,28 @@ func adminLDAPSyncHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	startedAt := nowRFC3339()
+	if err := persistLDAPSyncStatus(r.Context(), startedAt, "", "running", "manual sync in progress", 0); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to persist ldap sync status")
+		return
+	}
+
 	report, err := syncer.SyncAll(r.Context(), cfg)
+	finishedAt := nowRFC3339()
 	if err != nil {
+		if persistErr := persistLDAPSyncStatus(r.Context(), startedAt, finishedAt, "error", err.Error(), 0); persistErr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to persist ldap sync status")
+			return
+		}
 		if errors.Is(err, ldapauth.ErrLDAPDisabled) || errors.Is(err, ldapauth.ErrInvalidConfig) {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		writeJSONError(w, http.StatusInternalServerError, "ldap sync failed")
+		return
+	}
+	if err := persistLDAPSyncStatus(r.Context(), startedAt, finishedAt, "success", formatLDAPSyncSuccessMessage(report), int64(report.Upserted)); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to persist ldap sync status")
 		return
 	}
 
@@ -601,4 +616,28 @@ func loadLDAPSyncStatus(ctx context.Context, tx *sql.Tx) (adminLDAPSyncStatus, e
 		return resp, err
 	}
 	return resp, nil
+}
+
+func persistLDAPSyncStatus(ctx context.Context, startedAt string, finishedAt string, status string, message string, count int64) error {
+	return appStore.WithTx(ctx, false, func(tx *sql.Tx) error {
+		if err := store.SetSettingString(ctx, tx, store.SettingLDAPLastSyncStartedAt, startedAt); err != nil {
+			return err
+		}
+		if err := store.SetSettingString(ctx, tx, store.SettingLDAPLastSyncFinishedAt, finishedAt); err != nil {
+			return err
+		}
+		if err := store.SetSettingString(ctx, tx, store.SettingLDAPLastSyncStatus, status); err != nil {
+			return err
+		}
+		if err := store.SetSettingString(ctx, tx, store.SettingLDAPLastSyncMessage, message); err != nil {
+			return err
+		}
+		return store.SetSettingInt(ctx, tx, store.SettingLDAPLastSyncCount, count)
+	})
+}
+
+func formatLDAPSyncSuccessMessage(report ldapauth.SyncReport) string {
+	return "manual sync completed: upserted=" + strconv.Itoa(report.Upserted) +
+		" skipped=" + strconv.Itoa(report.Skipped) +
+		" missingMarked=" + strconv.Itoa(report.MissingMarked)
 }

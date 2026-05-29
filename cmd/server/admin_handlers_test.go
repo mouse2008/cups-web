@@ -71,6 +71,38 @@ func TestAdminUpdateUser_RejectsLDAPPasswordChange(t *testing.T) {
 	})
 }
 
+func TestAdminUpdateUser_RejectsLDAPUsernameChange(t *testing.T) {
+	ctx := context.Background()
+	s := setupAdminHandlerTest(t, ctx)
+	user := seedLDAPBackedUser(t, ctx, s, "alice", "alice-uid", "cn=alice,dc=example,dc=com")
+
+	rec := performAdminRequest(t, adminUpdateUserHandler, http.MethodPut, "/api/admin/users/1", map[string]any{
+		"username":    "alice-renamed",
+		"role":        "admin",
+		"contactName": "Alice LDAP",
+		"phone":       "123456",
+		"email":       "alice@example.com",
+	}, userAdminSession(), map[string]string{"id": strconv.FormatInt(user.ID, 10)})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("adminUpdateUserHandler status = %d, body = %s, want %d", rec.Code, rec.Body.String(), http.StatusBadRequest)
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if body["error"] != "ldap username cannot be changed in app" {
+		t.Fatalf("error = %q, want ldap username rejection", body["error"])
+	}
+
+	assertUserByID(t, ctx, s, user.ID, func(got store.User) {
+		if got.Username != "alice" {
+			t.Fatalf("Username = %q, want unchanged alice", got.Username)
+		}
+	})
+}
+
 func TestAdminDeleteUser_RejectsLDAPUser(t *testing.T) {
 	ctx := context.Background()
 	s := setupAdminHandlerTest(t, ctx)
@@ -134,6 +166,59 @@ func TestAdminLDAPSync_TriggersServiceSync(t *testing.T) {
 	}
 	if body.Report != fake.syncReport {
 		t.Fatalf("report = %+v, want %+v", body.Report, fake.syncReport)
+	}
+}
+
+func TestAdminLDAPSync_PersistsLatestSyncStatus(t *testing.T) {
+	ctx := context.Background()
+	s := setupAdminHandlerTest(t, ctx)
+	enableFullLDAPConfig(t, ctx, s)
+
+	fake := &fakeAdminLDAPService{
+		syncReport: ldapauth.SyncReport{Upserted: 4, Skipped: 2, MissingMarked: 1},
+	}
+	oldLDAPService := ldapService
+	ldapService = fake
+	t.Cleanup(func() {
+		ldapService = oldLDAPService
+	})
+
+	rec := performAdminRequest(t, adminLDAPSyncHandler, http.MethodPost, "/api/admin/ldap/sync", map[string]any{}, userAdminSession())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("adminLDAPSyncHandler status = %d, body = %s, want %d", rec.Code, rec.Body.String(), http.StatusOK)
+	}
+
+	getRec := performAdminRequest(t, adminGetSettingsHandler, http.MethodGet, "/api/admin/settings", nil, userAdminSession())
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("adminGetSettingsHandler GET status = %d, body = %s, want %d", getRec.Code, getRec.Body.String(), http.StatusOK)
+	}
+
+	var body struct {
+		LDAPSyncStatus struct {
+			LastStartedAt  string `json:"lastStartedAt"`
+			LastFinishedAt string `json:"lastFinishedAt"`
+			LastStatus     string `json:"lastStatus"`
+			LastMessage    string `json:"lastMessage"`
+			LastCount      int64  `json:"lastCount"`
+		} `json:"ldapSyncStatus"`
+	}
+	if err := json.NewDecoder(getRec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode settings response: %v", err)
+	}
+	if body.LDAPSyncStatus.LastStartedAt == "" {
+		t.Fatalf("ldapSyncStatus.lastStartedAt = empty, want persisted timestamp")
+	}
+	if body.LDAPSyncStatus.LastFinishedAt == "" {
+		t.Fatalf("ldapSyncStatus.lastFinishedAt = empty, want persisted timestamp")
+	}
+	if body.LDAPSyncStatus.LastStatus != "success" {
+		t.Fatalf("ldapSyncStatus.lastStatus = %q, want success", body.LDAPSyncStatus.LastStatus)
+	}
+	if body.LDAPSyncStatus.LastMessage != "manual sync completed: upserted=4 skipped=2 missingMarked=1" {
+		t.Fatalf("ldapSyncStatus.lastMessage = %q, want success summary", body.LDAPSyncStatus.LastMessage)
+	}
+	if body.LDAPSyncStatus.LastCount != 4 {
+		t.Fatalf("ldapSyncStatus.lastCount = %d, want 4", body.LDAPSyncStatus.LastCount)
 	}
 }
 
