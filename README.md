@@ -142,7 +142,10 @@ services:
     restart: unless-stopped
 
   web:
-    image: hanxi/cups-web:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mouse2008/cups-web:ldap
     user: root
     environment:
       - CUPS_HOST=cups:631
@@ -156,10 +159,19 @@ services:
     restart: unless-stopped
 ```
 
+仓库内的 `docker-compose.yml` 默认会从当前源码构建 `web` 容器，适合部署你自己的最新代码。
+
+如果你是从自己的分支部署，建议先拉取对应分支再构建：
+
+```bash
+git clone -b codex/ldap-user-management git@github.com:mouse2008/cups-web.git
+cd cups-web
+```
+
 也可直接下载仓库内的 `docker-compose.yml`：
 
 ```bash
-wget https://raw.githubusercontent.com/hanxi/cups-web/master/docker-compose.yml
+wget https://raw.githubusercontent.com/mouse2008/cups-web/codex/ldap-user-management/docker-compose.yml
 ```
 
 ### 2. 配置环境变量
@@ -174,7 +186,20 @@ CUPSPASSWORD=your_cups_password
 ### 3. 启动服务
 
 ```bash
-docker-compose up -d
+docker compose up -d --build
+```
+
+后续代码更新后，进入项目目录执行：
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+如果你的环境还是旧版 Compose，也可以使用：
+
+```bash
+docker-compose up -d --build
 ```
 
 ### 4. 配置打印机

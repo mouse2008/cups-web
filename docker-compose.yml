@@ -14,7 +14,10 @@ services:
     restart: unless-stopped
 
   web:
-    image: hanxi/cups-web:master
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mouse2008/cups-web:ldap
     user: root
     environment:
       - CUPS_HOST=cups:631
