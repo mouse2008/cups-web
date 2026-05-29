@@ -156,6 +156,7 @@ cups-web/
 | POST | `/api/admin/users` | 创建用户 |
 | PUT | `/api/admin/users/{id}` | 更新用户 |
 | DELETE | `/api/admin/users/{id}` | 删除用户（`admin` 账号禁止） |
+| POST | `/api/admin/ldap/sync` | 立即触发一次 LDAP 全量同步，返回本次 upsert / skipped / missingMarked 统计，并刷新最近一次同步状态 |
 | GET | `/api/admin/print-records` | 查询全站打印记录（可带 `username` / `start` / `end`） |
 | GET | `/api/admin/settings` | 读取系统设置 |
 | PUT | `/api/admin/settings` | 更新系统设置（`retentionDays`） |
@@ -193,6 +194,12 @@ SQLite，启用 `WAL` + `foreign_keys`；迁移逻辑在 `internal/store/store.g
 | `contact_name` | TEXT | 联系人 |
 | `phone` | TEXT | 电话 |
 | `email` | TEXT | 邮箱 |
+| `auth_source` | TEXT | 认证来源：`local`（本地密码）或 `ldap`（LDAP 账号） |
+| `ldap_dn` / `ldap_uid` | TEXT | LDAP 身份锚点，用于登录关联与同步 upsert |
+| `ldap_sync_enabled` | INTEGER | `1` 表示该 LDAP 用户参与同步缺席检测 |
+| `ldap_present` | INTEGER | `1` 表示最近一次同步仍在 LDAP 中存在；`0` 表示最近一次同步未再发现该用户，仅标记缺席，不会自动删除本地行 |
+| `last_ldap_sync_at` | TEXT | 最近一次该用户被 LDAP 登录/同步触达的时间 |
+| `last_login_at` | TEXT | 最近一次成功登录时间（本地或 LDAP） |
 | `created_at` / `updated_at` | TEXT | RFC3339 UTC |
 
 ### `print_jobs`
