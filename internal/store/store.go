@@ -16,7 +16,23 @@ const (
 )
 
 const (
-	SettingRetentionDays = "retention_days"
+	SettingRetentionDays          = "retention_days"
+	SettingLDAPEnabled            = "ldap_enabled"
+	SettingLDAPURL                = "ldap_url"
+	SettingLDAPBindDN             = "ldap_bind_dn"
+	SettingLDAPBindPassword       = "ldap_bind_password"
+	SettingLDAPBaseDN             = "ldap_base_dn"
+	SettingLDAPUserFilter         = "ldap_user_filter"
+	SettingLDAPLoginAttr          = "ldap_login_attr"
+	SettingLDAPDisplayNameAttr    = "ldap_display_name_attr"
+	SettingLDAPEmailAttr          = "ldap_email_attr"
+	SettingLDAPPhoneAttr          = "ldap_phone_attr"
+	SettingLDAPSyncIntervalMins   = "ldap_sync_interval_minutes"
+	SettingLDAPLastSyncStartedAt  = "ldap_last_sync_started_at"
+	SettingLDAPLastSyncFinishedAt = "ldap_last_sync_finished_at"
+	SettingLDAPLastSyncStatus     = "ldap_last_sync_status"
+	SettingLDAPLastSyncMessage    = "ldap_last_sync_message"
+	SettingLDAPLastSyncCount      = "ldap_last_sync_count"
 )
 
 type Store struct {
@@ -116,6 +132,27 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 	}
 	if err := addColumnIfMissing(ctx, s.DB, "users", "protected INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	if err := addColumnIfMissing(ctx, s.DB, "users", "auth_source TEXT NOT NULL DEFAULT 'local'"); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	if err := addColumnIfMissing(ctx, s.DB, "users", "ldap_dn TEXT"); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	if err := addColumnIfMissing(ctx, s.DB, "users", "ldap_uid TEXT"); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	if err := addColumnIfMissing(ctx, s.DB, "users", "ldap_sync_enabled INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	if err := addColumnIfMissing(ctx, s.DB, "users", "ldap_present INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	if err := addColumnIfMissing(ctx, s.DB, "users", "last_ldap_sync_at TEXT"); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	if err := addColumnIfMissing(ctx, s.DB, "users", "last_login_at TEXT"); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
 	if err := addColumnIfMissing(ctx, s.DB, "print_jobs", "is_duplex INTEGER NOT NULL DEFAULT 0"); err != nil {

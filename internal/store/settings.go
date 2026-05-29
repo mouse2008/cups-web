@@ -27,6 +27,35 @@ func SetSettingInt(ctx context.Context, tx *sql.Tx, key string, value int64) err
 	return err
 }
 
+func GetSettingBool(ctx context.Context, tx *sql.Tx, key string, defaultVal bool) (bool, error) {
+	raw, err := GetSettingString(ctx, tx, key, "")
+	if err != nil {
+		return false, err
+	}
+	if raw == "" {
+		return defaultVal, nil
+	}
+	parsed, err := strconv.ParseBool(raw)
+	if err == nil {
+		return parsed, nil
+	}
+	switch raw {
+	case "1":
+		return true, nil
+	case "0":
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+func SetSettingBool(ctx context.Context, tx *sql.Tx, key string, value bool) error {
+	if value {
+		return SetSettingString(ctx, tx, key, "1")
+	}
+	return SetSettingString(ctx, tx, key, "0")
+}
+
 func GetSettingString(ctx context.Context, tx *sql.Tx, key string, defaultVal string) (string, error) {
 	var value string
 	err := tx.QueryRowContext(ctx, "SELECT value FROM settings WHERE key = ?", key).Scan(&value)
