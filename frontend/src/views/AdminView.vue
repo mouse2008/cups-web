@@ -337,6 +337,16 @@ function createDefaultSettings() {
   }
 }
 
+function mapLDAPSyncStatus(data) {
+  return {
+    lastStartedAt: data?.ldapSyncStatus?.lastStartedAt || '',
+    lastFinishedAt: data?.ldapSyncStatus?.lastFinishedAt || '',
+    lastStatus: data?.ldapSyncStatus?.lastStatus || '',
+    lastMessage: data?.ldapSyncStatus?.lastMessage || '',
+    lastCount: data?.ldapSyncStatus?.lastCount || 0
+  }
+}
+
 function authSourceLabel(source) {
   return source === 'ldap' ? 'LDAP' : '本地'
 }
@@ -527,14 +537,19 @@ async function loadSettings() {
         phoneAttr: data?.ldap?.phoneAttr || 'telephoneNumber',
         syncIntervalMinutes: String(data?.ldap?.syncIntervalMinutes ?? 60)
       },
-      ldapSyncStatus: {
-        lastStartedAt: data?.ldapSyncStatus?.lastStartedAt || '',
-        lastFinishedAt: data?.ldapSyncStatus?.lastFinishedAt || '',
-        lastStatus: data?.ldapSyncStatus?.lastStatus || '',
-        lastMessage: data?.ldapSyncStatus?.lastMessage || '',
-        lastCount: data?.ldapSyncStatus?.lastCount || 0
-      }
+      ldapSyncStatus: mapLDAPSyncStatus(data)
     }
+  } catch (error) {
+    if (error.status !== 401) {
+      toast.add({ title: '加载失败', description: error.message, color: 'error', icon: 'i-lucide-x-circle' })
+    }
+  }
+}
+
+async function loadLDAPSyncStatus() {
+  try {
+    const data = await apiGetJSON('/api/admin/settings', handleUnauthorized)
+    settings.value.ldapSyncStatus = mapLDAPSyncStatus(data)
   } catch (error) {
     if (error.status !== 401) {
       toast.add({ title: '加载失败', description: error.message, color: 'error', icon: 'i-lucide-x-circle' })
@@ -598,6 +613,8 @@ async function syncLDAP() {
 
   if (syncSucceeded) {
     await Promise.allSettled([loadUsers(), loadSettings()])
+  } else {
+    await loadLDAPSyncStatus()
   }
 }
 

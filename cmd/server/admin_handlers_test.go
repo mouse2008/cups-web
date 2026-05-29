@@ -23,6 +23,7 @@ type fakeAdminLDAPService struct {
 	syncCfg    ldapauth.Config
 	syncReport ldapauth.SyncReport
 	syncErr    error
+	syncFn     func(ctx context.Context, cfg ldapauth.Config) (ldapauth.SyncReport, error)
 }
 
 func (f *fakeAdminLDAPService) AuthenticateOrProvision(ctx context.Context, cfg ldapauth.Config, username string, password string) (store.User, error) {
@@ -32,6 +33,9 @@ func (f *fakeAdminLDAPService) AuthenticateOrProvision(ctx context.Context, cfg 
 func (f *fakeAdminLDAPService) SyncAll(ctx context.Context, cfg ldapauth.Config) (ldapauth.SyncReport, error) {
 	f.syncCalled = true
 	f.syncCfg = cfg
+	if f.syncFn != nil {
+		return f.syncFn(ctx, cfg)
+	}
 	return f.syncReport, f.syncErr
 }
 
@@ -219,6 +223,68 @@ func TestAdminLDAPSync_PersistsLatestSyncStatus(t *testing.T) {
 	}
 	if body.LDAPSyncStatus.LastCount != 4 {
 		t.Fatalf("ldapSyncStatus.lastCount = %d, want 4", body.LDAPSyncStatus.LastCount)
+	}
+}
+
+func TestAdminLDAPSync_PersistsErrorStatusAfterRequestContextCanceled(t *testing.T) {
+	ctx := context.Background()
+	s := setupAdminHandlerTest(t, ctx)
+	enableFullLDAPConfig(t, ctx, s)
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	fake := &fakeAdminLDAPService{
+		syncFn: func(syncCtx context.Context, cfg ldapauth.Config) (ldapauth.SyncReport, error) {
+			cancel()
+			<-syncCtx.Done()
+			return ldapauth.SyncReport{}, syncCtx.Err()
+		},
+	}
+	oldLDAPService := ldapService
+	ldapService = fake
+	t.Cleanup(func() {
+		ldapService = oldLDAPService
+	})
+
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(map[string]any{}); err != nil {
+		t.Fatalf("encode request payload: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/ldap/sync", &body).WithContext(reqCtx)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", "test-csrf-token")
+	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "test-csrf-token"})
+
+	rec := httptest.NewRecorder()
+	if err := auth.SetSession(rec, userAdminSession()); err != nil {
+		t.Fatalf("auth.SetSession() err = %v", err)
+	}
+	for _, cookie := range rec.Result().Cookies() {
+		req.AddCookie(cookie)
+	}
+
+	rec = httptest.NewRecorder()
+	adminLDAPSyncHandler(rec, req)
+
+	var status adminLDAPSyncStatus
+	if err := s.WithTx(ctx, true, func(tx *sql.Tx) error {
+		var err error
+		status, err = loadLDAPSyncStatus(ctx, tx)
+		return err
+	}); err != nil {
+		t.Fatalf("load ldap sync status: %v", err)
+	}
+
+	if status.LastStatus != "error" {
+		t.Fatalf("ldapSyncStatus.lastStatus = %q, want error", status.LastStatus)
+	}
+	if status.LastMessage != context.Canceled.Error() {
+		t.Fatalf("ldapSyncStatus.lastMessage = %q, want %q", status.LastMessage, context.Canceled.Error())
+	}
+	if status.LastFinishedAt == "" {
+		t.Fatalf("ldapSyncStatus.lastFinishedAt = empty, want persisted timestamp")
 	}
 }
 

@@ -390,10 +390,11 @@ func adminLDAPSyncHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	persistCtx := context.WithoutCancel(r.Context())
 	report, err := syncer.SyncAll(r.Context(), cfg)
 	finishedAt := nowRFC3339()
 	if err != nil {
-		if persistErr := persistLDAPSyncStatus(r.Context(), startedAt, finishedAt, "error", err.Error(), 0); persistErr != nil {
+		if persistErr := persistLDAPSyncStatus(persistCtx, startedAt, finishedAt, "error", err.Error(), 0); persistErr != nil {
 			writeJSONError(w, http.StatusInternalServerError, "failed to persist ldap sync status")
 			return
 		}
@@ -404,7 +405,7 @@ func adminLDAPSyncHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "ldap sync failed")
 		return
 	}
-	if err := persistLDAPSyncStatus(r.Context(), startedAt, finishedAt, "success", formatLDAPSyncSuccessMessage(report), int64(report.Upserted)); err != nil {
+	if err := persistLDAPSyncStatus(persistCtx, startedAt, finishedAt, "success", formatLDAPSyncSuccessMessage(report), int64(report.Upserted)); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to persist ldap sync status")
 		return
 	}
