@@ -176,13 +176,10 @@ func UpsertLDAPUser(ctx context.Context, tx *sql.Tx, input UpsertLDAPUserInput) 
 
 	current, err := GetUserByLDAPUIDOrDN(ctx, tx, input.LDAPUID, input.LDAPDN)
 	if err == sql.ErrNoRows {
-		current, err = GetUserByUsername(ctx, tx, input.Username)
-	}
-	if err == sql.ErrNoRows {
 		return CreateUser(ctx, tx, CreateUserInput{
 			Username:        input.Username,
 			PasswordHash:    "",
-			Role:            normalizeRoleOrDefault(input.DefaultRole, RoleUser),
+			Role:            RoleUser,
 			Protected:       false,
 			ContactName:     input.ContactName,
 			Phone:           input.Phone,
@@ -311,13 +308,6 @@ func normalizeAuthSource(source string) string {
 		return authSourceLDAP
 	}
 	return authSourceLocal
-}
-
-func normalizeRoleOrDefault(role string, defaultRole string) string {
-	if role != "" {
-		return role
-	}
-	return defaultRole
 }
 
 func nullableStringValue(value string) any {
