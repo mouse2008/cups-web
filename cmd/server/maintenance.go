@@ -77,20 +77,20 @@ func runLDAPSyncOnce(ctx context.Context, s *store.Store, syncer ldapSyncService
 	}
 
 	startedAt := now.UTC().Format(time.RFC3339)
-	if err := persistLDAPSyncStatus(ctx, startedAt, "", "running", "scheduled sync in progress", 0); err != nil {
+	if err := persistLDAPSyncStatusForStore(ctx, s, startedAt, "", "running", "scheduled sync in progress", 0); err != nil {
 		return err
 	}
 
 	report, err := syncer.SyncAll(ctx, cfg)
 	finishedAt := nowRFC3339()
 	if err != nil {
-		if persistErr := persistLDAPSyncStatus(ctx, startedAt, finishedAt, "error", err.Error(), 0); persistErr != nil {
+		if persistErr := persistLDAPSyncStatusForStore(ctx, s, startedAt, finishedAt, "error", err.Error(), 0); persistErr != nil {
 			return persistErr
 		}
 		return err
 	}
 
-	return persistLDAPSyncStatus(ctx, startedAt, finishedAt, "success", formatScheduledLDAPSyncSuccessMessage(report), int64(report.Upserted))
+	return persistLDAPSyncStatusForStore(ctx, s, startedAt, finishedAt, "success", formatScheduledLDAPSyncSuccessMessage(report), int64(report.Upserted))
 }
 
 func shouldRunLDAPSync(lastStartedAt string, intervalMinutes int64, now time.Time) bool {
@@ -124,6 +124,24 @@ func loadLDAPLastSyncStartedAt(ctx context.Context, s *store.Store) (string, err
 		return nil
 	})
 	return lastStartedAt, err
+}
+
+func persistLDAPSyncStatusForStore(ctx context.Context, s *store.Store, startedAt string, finishedAt string, status string, message string, count int64) error {
+	return s.WithTx(ctx, false, func(tx *sql.Tx) error {
+		if err := store.SetSettingString(ctx, tx, store.SettingLDAPLastSyncStartedAt, startedAt); err != nil {
+			return err
+		}
+		if err := store.SetSettingString(ctx, tx, store.SettingLDAPLastSyncFinishedAt, finishedAt); err != nil {
+			return err
+		}
+		if err := store.SetSettingString(ctx, tx, store.SettingLDAPLastSyncStatus, status); err != nil {
+			return err
+		}
+		if err := store.SetSettingString(ctx, tx, store.SettingLDAPLastSyncMessage, message); err != nil {
+			return err
+		}
+		return store.SetSettingInt(ctx, tx, store.SettingLDAPLastSyncCount, count)
+	})
 }
 
 func formatScheduledLDAPSyncSuccessMessage(report ldapauth.SyncReport) string {
