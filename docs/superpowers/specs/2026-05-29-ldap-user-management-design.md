@@ -1,70 +1,75 @@
-# LDAP User Management Design
+# LDAP 用户管理设计
 
-## Summary
+## 概述
 
-Add LDAP-backed user directory support to `cups-web` while preserving the existing local-user model, session flow, and authorization checks.
+为 `cups-web` 增加基于 LDAP 的用户目录能力，同时保留现有本地用户模型、会话流程和权限校验机制。
 
-The selected behavior is:
+已确认的目标行为如下：
 
-- LDAP users can be synchronized into the local database.
-- LDAP authentication is supported for LDAP-backed users.
-- Roles remain locally managed even for LDAP users.
-- Synchronization can run on a schedule and also be triggered manually by an administrator.
-- Local users and the protected default `admin` account continue to work unchanged.
+- 支持将 LDAP 用户同步到本地数据库。
+- 支持 LDAP 用户通过 LDAP 凭据登录。
+- 即使是 LDAP 用户，角色仍由本地管理。
+- 支持管理员手动触发同步，也支持按计划定时同步。
+- 本地用户和受保护的默认 `admin` 账号继续按现有方式工作。
 
-This is a hybrid identity model: authentication may come from either the local database or LDAP, but the application still uses the local `users` table as the single source of truth for session identity, authorization, print ownership, and admin UI listing.
+这是一个“混合身份模型”：认证来源可以是本地数据库，也可以是 LDAP；但应用内部仍以本地 `users` 表作为会话身份、权限判断、打印记录归属和管理后台用户列表的统一数据源。
 
-## Goals
+## 目标
 
-- Support importing and refreshing users from LDAP.
-- Allow LDAP users to authenticate with LDAP credentials.
-- Keep local role assignment for LDAP users.
-- Reuse the existing `users` table and session model so print records and admin functions stay stable.
-- Allow scheduled background sync plus admin-triggered sync.
-- Keep local accounts working when LDAP is disabled or temporarily unavailable.
+- 支持从 LDAP 导入和刷新用户。
+- 支持 LDAP 用户通过 LDAP 密码认证登录。
+- 保留 LDAP 用户的本地角色分配能力。
+- 复用现有 `users` 表和 session 模型，避免影响打印记录和管理后台功能。
+- 支持定时后台同步，以及管理员手动触发同步。
+- 在 LDAP 被关闭或暂时不可用时，本地账号仍能正常工作。
 
-## Non-Goals
+## 非目标
 
-- No role mapping from LDAP groups in the first version.
-- No password reset or password change for LDAP users inside the app.
-- No deletion of users from the LDAP server.
-- No asynchronous task queue or progress-tracking job system in the first version.
-- No automatic hard-delete of local users when they disappear from LDAP.
+- 第一版不做 LDAP 组到角色的映射。
+- 第一版不支持在应用内为 LDAP 用户修改密码或重置密码。
+- 第一版不支持从应用中删除 LDAP 目录里的真实用户。
+- 第一版不引入异步任务队列或同步进度任务系统。
+- 第一版不在 LDAP 用户从目录中消失时自动硬删除本地用户。
 
-## Current State
+## 当前实现现状
 
-The current implementation uses a single `users` table with a bcrypt `password_hash`, local role storage, and session cookies based on `securecookie`.
+当前系统只有一张 `users` 表，使用 bcrypt 存储密码哈希，角色保存在本地，登录后用 `securecookie` 发放 session cookie。
 
-Relevant current behavior:
+与当前认证和用户管理相关的核心实现：
 
-- `cmd/server/auth_handlers.go` authenticates directly against the local `users` table.
-- `internal/store/users.go` assumes every user is a local row with a stored password hash.
-- `cmd/server/admin_handlers.go` allows admins to create, update, and delete local users.
-- `cmd/server/bootstrap.go` ensures the protected local `admin` account exists.
-- `cmd/server/maintenance.go` already runs background maintenance on a timer and can host scheduled LDAP sync.
+- `cmd/server/auth_handlers.go`
+  直接从本地 `users` 表认证用户名和密码。
+- `internal/store/users.go`
+  假设所有用户都是本地行，并且都依赖 `password_hash`。
+- `cmd/server/admin_handlers.go`
+  管理员可以创建、更新、删除本地用户。
+- `cmd/server/bootstrap.go`
+  保证受保护的本地 `admin` 账号始终存在。
+- `cmd/server/maintenance.go`
+  已经具备定时后台维护循环，适合挂载 LDAP 定时同步。
 
-## Chosen Architecture
+## 选定架构
 
-Use a hybrid user directory with a single local `users` table extended to support multiple authentication sources.
+采用“单表扩展 + 混合认证来源”的方案。
 
-The local database remains authoritative for:
+本地数据库继续作为以下能力的权威来源：
 
-- session identity
-- user IDs referenced by print records
-- roles
-- admin UI listing
-- contact information after import
+- session 身份
+- 打印记录里引用的用户 ID
+- 角色
+- 管理后台用户列表
+- 导入后的联系人信息
 
-LDAP becomes authoritative for:
+LDAP 作为以下能力的权威来源：
 
-- password verification of LDAP users
-- source identity attributes used to discover and refresh LDAP-backed accounts
+- LDAP 用户的密码校验
+- 用于发现和刷新 LDAP 用户的目录身份属性
 
-This avoids rewriting session handling, print ownership, and user-related joins while still enabling directory-backed authentication and sync.
+这样做的好处是：不需要重写现有 session、打印记录归属和基于 `users.id` 的查询关系，同时又能支持 LDAP 登录与目录同步。
 
-## Data Model Changes
+## 数据模型变更
 
-Extend `users` with the following fields:
+在现有 `users` 表中新增以下字段：
 
 - `auth_source TEXT NOT NULL DEFAULT 'local'`
 - `ldap_dn TEXT`
@@ -74,35 +79,38 @@ Extend `users` with the following fields:
 - `last_ldap_sync_at TEXT`
 - `last_login_at TEXT`
 
-### Field Semantics
+### 字段语义
 
 - `auth_source`
-  - `local`: password stored in `password_hash`
-  - `ldap`: password is verified against LDAP
+  - `local`：密码使用本地 `password_hash`
+  - `ldap`：密码通过 LDAP 校验
 - `ldap_dn`
-  - the LDAP distinguished name used for bind/auth and stable matching
+  - LDAP 用户的 DN，用于 bind 认证和稳定匹配
 - `ldap_uid`
-  - the application-level unique directory identifier derived from the configured login attribute
+  - 应用侧保存的 LDAP 唯一标识，来源于配置的登录属性
 - `ldap_sync_enabled`
-  - identifies rows managed by LDAP synchronization
+  - 标记该用户是否由 LDAP 同步管理
 - `ldap_present`
-  - whether the user was seen in the most recent sync; used to disable stale LDAP accounts without deleting records
+  - 标记该用户是否在最近一次同步中仍然存在于 LDAP 目录中
 - `last_ldap_sync_at`
-  - timestamp of last successful sync/update for that user
+  - 该用户最近一次被成功同步的时间
 - `last_login_at`
-  - timestamp of the last successful login
+  - 该用户最近一次成功登录时间
 
-### Existing Columns
+### 现有字段保留策略
 
-- `password_hash` remains required for schema compatibility, but LDAP users will not use it for authentication.
-- `role` remains the authority for authorization and is never overwritten by LDAP sync.
-- `contact_name`, `phone`, and `email` can be hydrated from LDAP and remain editable locally.
+- `password_hash`
+  为兼容现有 schema 继续保留，但 LDAP 用户登录时不使用该字段认证。
+- `role`
+  仍然是权限判断的唯一依据，LDAP 同步不会覆盖它。
+- `contact_name`、`phone`、`email`
+  可以从 LDAP 同步补齐，同时允许管理员在本地维护。
 
-## LDAP Configuration Model
+## LDAP 配置模型
 
-Store LDAP configuration in the existing `settings` table.
+LDAP 配置继续存放在现有 `settings` 表中，不额外新增配置文件。
 
-New setting keys:
+新增配置项：
 
 - `ldap_enabled`
 - `ldap_url`
@@ -116,103 +124,106 @@ New setting keys:
 - `ldap_phone_attr`
 - `ldap_sync_interval_minutes`
 
-### Configuration Behavior
+### 配置行为约束
 
-- If `ldap_enabled` is false, all LDAP login and sync behavior is skipped.
-- Configuration read failures or LDAP connectivity failures must not block local-user login.
-- `ldap_bind_password` is stored in the same settings table as other application secrets today. This is acceptable for the first version because the project already persists session keys there, but it should be treated as sensitive in logs and API responses.
+- `ldap_enabled = false` 时，所有 LDAP 登录和同步逻辑都跳过。
+- LDAP 配置读取失败或 LDAP 服务连接失败，不得影响本地用户登录。
+- `ldap_bind_password` 和当前的 session 密钥一样，第一版继续存储在 `settings` 表中，但必须视为敏感信息，不能写入日志，也不能在接口响应中明文回显。
 
-## Authentication Flow
+## 认证流程
 
-### Local User Login
+### 本地用户登录
 
-If a matching user row has `auth_source = 'local'`, continue using the current bcrypt password check.
+如果查到的本地用户行 `auth_source = 'local'`，则继续走当前 bcrypt 密码校验流程。
 
-### LDAP User Login
+### LDAP 用户登录
 
-If LDAP is enabled, login should follow this sequence:
+如果 LDAP 已启用，登录流程按以下顺序执行：
 
-1. Read the submitted username and password.
-2. Attempt local-user lookup by username.
-3. If the user exists and `auth_source = 'local'`, use local authentication only.
-4. Otherwise, search LDAP for the submitted username using `ldap_login_attr` and `ldap_user_filter`.
-5. Require exactly one LDAP match.
-6. Attempt LDAP bind using the matched user DN and the submitted password.
-7. On success:
-   - find an existing local row by `ldap_uid` or `ldap_dn`
-   - if none exists, create a new local row with:
+1. 读取提交的用户名和密码。
+2. 先按用户名查询本地用户。
+3. 如果本地用户存在且 `auth_source = 'local'`，只走本地认证，不再尝试 LDAP。
+4. 否则使用 `ldap_login_attr` 和 `ldap_user_filter` 到 LDAP 中搜索该用户名。
+5. 要求 LDAP 搜索结果必须唯一命中一条记录。
+6. 使用命中的用户 DN 和用户输入的密码执行 LDAP bind。
+7. bind 成功后：
+   - 按 `ldap_uid` 查找已有本地用户，必要时回退到 `ldap_dn`
+   - 如果不存在本地映射，则自动创建一条本地用户：
      - `auth_source = 'ldap'`
-     - default `role = 'user'`
-     - imported contact fields
-     - sync markers populated
-   - if a row exists, refresh LDAP-managed fields
-   - update `last_login_at`
-   - issue the existing session cookie with the local row ID and local role
-8. On failure, return an authentication error without leaking directory details.
+     - 默认 `role = 'user'`
+     - 写入同步得到的联系人信息
+     - 写入同步标记字段
+   - 如果本地映射已存在，则刷新 LDAP 管理字段
+   - 更新 `last_login_at`
+   - 继续使用现有 session 机制发放 cookie，session 中仍保存本地用户 ID 和本地角色
+8. 认证失败时，返回通用认证错误，不向前端泄露 LDAP 目录细节。
 
-### Conflict Rules
+### 冲突处理规则
 
-- If a same-name local user already exists with `auth_source = 'local'`, LDAP auto-provisioning must not overwrite it.
-- If multiple LDAP entries match, authentication fails.
-- If LDAP lookup fails due to connectivity, local users still work and LDAP authentication returns a generic failure.
+- 如果本地已经存在同名 `local` 用户，则 LDAP 自动建档不能覆盖它。
+- 如果 LDAP 搜索命中多条记录，则认证失败。
+- 如果 LDAP 查询因网络或服务不可用失败，则本地用户仍可登录，LDAP 登录返回通用失败。
 
-## Synchronization Strategy
+## 同步策略
 
-Synchronization runs in three modes:
+同步分三种触发方式：
 
-### 1. Login-Time Refresh
+### 1. 登录时轻量刷新
 
-After a successful LDAP login, refresh only that single user's LDAP-backed profile fields and sync markers.
+LDAP 用户登录成功后，仅刷新当前这个用户的目录资料和同步标记，不触发全量扫描。
 
-This keeps login responsive and avoids turning each login into a full directory scan.
+这样可以避免每次登录都把一次交互请求变成整库同步。
 
-### 2. Admin-Triggered Manual Sync
+### 2. 管理员手动同步
 
-Add an admin-only endpoint to run a full LDAP sync on demand.
+新增管理员专用接口，允许手动执行一次全量 LDAP 同步。
 
-The first version should execute synchronously in the request lifecycle, matching the project's current operational style and avoiding a new background job subsystem.
+第一版建议同步执行，直接复用当前项目的请求处理模式，不引入任务队列和后台作业框架。
 
-### 3. Scheduled Background Sync
+### 3. 定时后台同步
 
-Extend the existing maintenance loop to run LDAP sync at the configured interval.
+在现有 `maintenance.go` 后台维护循环中扩展 LDAP 定时同步逻辑。
 
-Behavior:
+行为要求：
 
-- disabled when LDAP is off
-- disabled when interval is zero or invalid
-- logs failures and continues future cycles
-- never crashes the process on LDAP errors
+- LDAP 关闭时不运行
+- 同步间隔为 0 或非法值时不运行
+- 同步失败只记录日志，不影响后续下一轮同步
+- LDAP 错误不能导致进程崩溃
 
-## Sync Semantics
+## 同步语义
 
-Full sync should:
+全量同步应执行以下步骤：
 
-1. Query LDAP using the configured base DN and user filter.
-2. Build a normalized representation for each discovered directory user.
-3. Match existing local rows by `ldap_uid`, falling back to `ldap_dn` when needed.
-4. Create missing LDAP users as local rows with `auth_source = 'ldap'`, `ldap_sync_enabled = 1`, and default role `user`.
-5. Update existing LDAP users' directory fields and sync markers.
-6. Preserve local-only fields and policy-owned fields:
-   - preserve `role`
-   - preserve local password data for local users
-   - do not convert local users into LDAP users automatically
-7. Mark previously synced LDAP users that were not present in the latest directory result as `ldap_present = 0`.
+1. 使用配置的 `base DN` 和用户过滤器查询 LDAP。
+2. 将每条目录记录转换成应用内部统一的标准结构。
+3. 优先按 `ldap_uid` 匹配已有本地用户，必要时回退到 `ldap_dn`。
+4. 对不存在的 LDAP 用户，新建本地用户行，并写入：
+   - `auth_source = 'ldap'`
+   - `ldap_sync_enabled = 1`
+   - 默认 `role = 'user'`
+5. 对已存在的 LDAP 用户，更新其目录字段和同步标记。
+6. 对以下字段保留本地策略，不允许 LDAP 覆盖：
+   - `role`
+   - 本地用户的密码数据
+   - 本地用户的认证来源
+7. 对上一轮已同步、但本轮 LDAP 未再出现的用户，标记 `ldap_present = 0`。
 
-### Contact Field Merge Rule
+### 联系方式字段合并规则
 
-For `contact_name`, `phone`, and `email`, use "fill empty fields, do not overwrite non-empty local values" in the first version.
+对于 `contact_name`、`phone`、`email`，第一版采用“本地为空时由 LDAP 补齐，本地非空时不覆盖”的规则。
 
-Reasoning:
+原因：
 
-- admins explicitly want local control over user management
-- hard overwrite would erase manual corrections
-- this rule is simple and predictable
+- 你已经确认 LDAP 用户角色和用户管理仍要保留本地控制
+- 强覆盖会把管理员手工修正的信息刷掉
+- 该规则简单、稳定、可预测
 
-## User Management UI and API Changes
+## 管理后台与 API 变更
 
-### User List
+### 用户列表
 
-Extend the admin user response with:
+管理员用户列表接口需要新增以下字段：
 
 - `authSource`
 - `ldapSyncEnabled`
@@ -220,63 +231,66 @@ Extend the admin user response with:
 - `lastLdapSyncAt`
 - `lastLoginAt`
 
-### Local User Creation
+### 新建本地用户
 
-`POST /api/admin/users` continues to create only local users.
+`POST /api/admin/users` 保持现有行为，只允许创建本地用户。
 
-### User Editing
+### 编辑用户
 
-For LDAP users:
+对于 LDAP 用户：
 
-- username is read-only
-- password is hidden or disabled
-- role remains editable
-- contact fields remain editable
+- 用户名只读
+- 密码输入框隐藏或禁用
+- 角色仍可编辑
+- 联系人、电话、邮箱仍可编辑
 
-For local users:
+对于本地用户：
 
-- existing behavior remains
+- 保持当前行为不变
 
-### User Deletion
+### 删除用户
 
-Deleting an LDAP user is not supported in the first version.
+第一版不支持删除 LDAP 用户。
 
-Reasoning:
+原因：
 
-- the current schema uses `print_jobs.user_id -> users.id ON DELETE CASCADE`
-- deleting a user row would also delete historical print records
-- introducing soft-delete semantics is safer than pretending delete is harmless
+- 当前 schema 中 `print_jobs.user_id -> users.id` 使用 `ON DELETE CASCADE`
+- 如果直接删除 LDAP 用户行，会连带删除其历史打印记录
+- 在没有完整软删除模型之前，禁止删除比错误地丢历史数据更安全
 
-Required first-version behavior:
+第一版必须满足的行为：
 
-- local users keep the existing delete behavior
-- LDAP users cannot be deleted from the admin UI
-- if an LDAP user disappears from the directory, sync marks the user as `ldap_present = 0`
-- users with `ldap_present = 0` cannot authenticate through LDAP
-- their historical print records remain visible
+- 本地用户继续支持现有删除逻辑
+- LDAP 用户在管理后台中不可删除
+- 如果某 LDAP 用户已经从目录中消失，则同步时将其标记为 `ldap_present = 0`
+- `ldap_present = 0` 的用户后续不能再通过 LDAP 登录
+- 该用户已有的历史打印记录继续保留并可查询
 
-### Settings UI
+### 设置页面
 
-Add an LDAP settings section under admin system settings, including:
+在后台“系统设置”中新增 LDAP 配置区，建议包含：
 
-- enable switch
-- server URL
+- LDAP 开关
+- 服务地址
 - bind DN
-- bind password
+- bind 密码
 - base DN
-- user filter
-- login attribute
-- display name attribute
-- email attribute
-- phone attribute
-- sync interval
-- manual sync action
+- 用户过滤器
+- 登录属性
+- 显示名属性
+- 邮箱属性
+- 电话属性
+- 同步间隔
+- 手动同步按钮
 
-Sensitive fields must never be echoed back in plaintext once saved. The read API should either omit `ldap_bind_password` or return a masked placeholder indicator.
+敏感字段要求：
 
-## API Surface
+- 已保存的 `ldap_bind_password` 不能以明文回显
+- 设置读取接口应返回“是否已设置密码”的状态，或返回掩码占位，不返回真实值
 
-### Existing Endpoints to Extend
+## API 面设计
+
+### 需要扩展的现有接口
 
 - `GET /api/admin/users`
 - `PUT /api/admin/users/{id}`
@@ -284,14 +298,14 @@ Sensitive fields must never be echoed back in plaintext once saved. The read API
 - `PUT /api/admin/settings`
 - `POST /api/login`
 
-### New Endpoints
+### 新增接口
 
 - `POST /api/admin/ldap/sync`
-  - runs an admin-triggered directory synchronization
+  - 管理员手动触发一次 LDAP 全量同步
 
-## Settings and Status Metadata
+## 同步状态元数据
 
-To support admin visibility, add settings or status fields for:
+为了让管理员看到最近同步情况，在 `settings` 中增加以下状态字段：
 
 - `ldap_last_sync_started_at`
 - `ldap_last_sync_finished_at`
@@ -299,75 +313,78 @@ To support admin visibility, add settings or status fields for:
 - `ldap_last_sync_message`
 - `ldap_last_sync_count`
 
-This avoids introducing a new table while still providing enough observability for the UI and troubleshooting. The first version returns this status data from `GET /api/admin/settings` instead of creating a separate sync-status endpoint.
+第一版不新增单独状态表，也不新增单独的同步状态接口；这些状态直接通过 `GET /api/admin/settings` 返回即可，足够支撑后台展示和排障。
 
-## Error Handling
+## 错误处理
 
-### Authentication Errors
+### 认证错误
 
-- Return generic authentication failure to clients.
-- Log actionable LDAP details server-side without printing secrets.
+- 对前端统一返回通用认证失败信息。
+- 服务端日志保留可排查信息，但不得打印密码或 bind 密钥等敏感内容。
 
-### Configuration Errors
+### 配置错误
 
-- Saving invalid LDAP settings should fail validation at the admin API boundary where possible.
-- Missing required LDAP settings should block LDAP sync and LDAP login, but not local login.
+- 管理员保存 LDAP 配置时，接口层应尽量提前做参数校验。
+- 如果 LDAP 必填配置缺失，则应阻止 LDAP 登录和 LDAP 同步，但不能影响本地账号登录。
 
-### Directory Ambiguity
+### 目录结果异常
 
-- Zero results: authentication fails
-- Multiple results: authentication fails
-- Missing required LDAP attributes during sync: skip the record and log it
+- 查询结果为 0 条：认证失败
+- 查询结果多于 1 条：认证失败
+- 同步过程中缺少关键 LDAP 属性：跳过该用户并记日志
 
-### Directory Availability
+### LDAP 服务可用性
 
-- LDAP downtime must not block service startup.
-- Scheduled sync failures are logged and retried on the next cycle.
+- LDAP 不可用不能阻止应用启动。
+- 定时同步失败只记日志，并在下一轮按计划继续重试。
 
-## Security Considerations
+## 安全要求
 
-- Keep the protected local `admin` account as a break-glass path even when LDAP is enabled.
-- Never allow LDAP sync to remove or rename the protected local `admin`.
-- Do not expose bind passwords in API responses or logs.
-- Continue using existing session and CSRF protections unchanged.
-- Prefer LDAPS or StartTLS-capable configuration support during implementation.
+- 即使启用了 LDAP，也必须保留受保护的本地 `admin` 账号作为兜底入口。
+- LDAP 同步绝不能修改或删除受保护的本地 `admin`。
+- `ldap_bind_password` 不能出现在日志和接口明文响应中。
+- 继续复用现有 session 与 CSRF 保护，不改变其安全边界。
+- 实现阶段优先支持 LDAPS 或可升级到 TLS 的 LDAP 连接方式。
 
-## Migration Plan
+## 迁移步骤
 
-1. Add schema columns with idempotent migrations.
-2. Introduce LDAP settings accessors and validation.
-3. Implement LDAP client/service layer.
-4. Update login handler for hybrid auth.
-5. Update admin user APIs and settings APIs.
-6. Add manual sync endpoint.
-7. Add scheduled sync integration in maintenance loop.
-8. Update frontend admin UI and login-related presentation as needed.
-9. Add tests for migration, login, sync, and admin restrictions.
+1. 为 `users` 表新增 LDAP 相关字段，并保持迁移幂等。
+2. 增加 LDAP 配置读写和校验逻辑。
+3. 实现 LDAP 客户端或 LDAP 服务层。
+4. 将登录逻辑改为本地认证 + LDAP 认证并存。
+5. 扩展后台用户接口和设置接口。
+6. 增加管理员手动同步接口。
+7. 将定时同步接入现有维护循环。
+8. 更新前端后台页面和必要的登录提示。
+9. 为迁移、登录、同步、编辑限制等行为补测试。
 
-## Testing Strategy
+## 测试策略
 
-At minimum, cover:
+至少覆盖以下行为：
 
-- migration from an older database without LDAP columns
-- local login remains unchanged
-- first LDAP login auto-provisions a local row
-- repeated LDAP login refreshes LDAP metadata without overwriting role
-- LDAP users cannot change password through admin update
-- manual sync creates and updates LDAP users
-- full sync marks missing LDAP users as not present
-- scheduled sync is disabled when LDAP is off
-- LDAP errors do not break local auth or panic the maintenance loop
+- 老数据库升级后，新增 LDAP 字段迁移成功
+- 本地用户登录行为不变
+- LDAP 用户首次登录自动建档
+- LDAP 用户再次登录时会刷新 LDAP 字段，但不会覆盖本地角色
+- LDAP 用户不能通过后台修改密码
+- 管理员手动同步可以新增和更新 LDAP 用户
+- 全量同步会把目录中已消失的 LDAP 用户标记为 `ldap_present = 0`
+- LDAP 关闭时定时同步不会运行
+- LDAP 出错时不会影响本地认证，也不会让后台维护 goroutine panic
 
-Use an LDAP abstraction that can be mocked in tests instead of binding handler tests directly to a live directory.
+测试实现建议：
 
-## Recommended Implementation Direction
+- 提供一个可替换的 LDAP 抽象层，便于单元测试 mock
+- 不要把 handler 测试直接绑定到真实 LDAP 服务
 
-Implement a dedicated LDAP service layer under `internal/auth` or a new `internal/ldap` package, and keep handlers thin.
+## 推荐实现边界
 
-The most important boundary is:
+建议新增一个专门的 LDAP 服务层，位置可以是 `internal/auth` 下的 LDAP 子模块，或新增 `internal/ldap` 包。handler 保持尽量薄，只负责流程编排。
 
-- handlers decide which flow to invoke
-- LDAP service performs lookup, bind, normalization, and sync
-- store layer owns durable user persistence and migration
+职责边界建议如下：
 
-This keeps the hybrid auth behavior testable and avoids scattering LDAP-specific logic across handlers, store functions, and maintenance code.
+- handler 决定走本地认证还是 LDAP 认证
+- LDAP 服务层负责搜索、bind、属性标准化和同步
+- store 层负责 schema 迁移和用户持久化
+
+这样可以把“混合认证 + 目录同步”的复杂度集中在可测试的边界里，避免把 LDAP 逻辑散落到 handler、store 和后台维护循环各处。
