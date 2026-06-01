@@ -14,12 +14,20 @@
 # 下载策略：
 # 与 install-hp-laserjet1020.sh / install-konica-bizhub.sh 同模式：从本仓库
 # 自维护的 GitHub Releases 镜像（tag = cups-driver）下载完整 zip，避免
-# Sharp 官方 CDN 在 CI 里的不稳定性。fail-fast：下载或解压失败立即非零退出。
+# Sharp 官方 CDN 在 CI 里的不稳定性。该 PPD 属于可选增强项，因此改为
+# best-effort：下载或解压失败时打印 WARNING 并 exit 0，不阻塞整体构建。
 #
 # 架构说明：
 # PPD 是纯文本文件，与 CPU 架构无关，所有架构（amd64/arm64/armhf）统一安装。
 
 set -eo pipefail
+
+warn_skip() {
+    echo "[sharp] WARNING: $*"
+    echo "[sharp] WARNING: Sharp PPD install skipped; build continues"
+    exit 0
+}
+
 
 # ────────────────────────────────────────────────────────────────────
 # 配置
@@ -37,19 +45,19 @@ trap 'rm -rf "${BUILD_DIR}"' EXIT
 cd "${BUILD_DIR}"
 
 echo "[sharp] downloading from ${SHARP_MIRROR_URL}"
-curl -fL --retry 3 --retry-delay 3 -o "${SHARP_ZIP}" "${SHARP_MIRROR_URL}"
+curl -fL --retry 3 --retry-delay 3 -o "${SHARP_ZIP}" "${SHARP_MIRROR_URL}" || warn_skip "failed to download Sharp driver zip"
 
 # 解压 PPD 文件（-j 忽略 zip 内目录结构，-d 指定输出目录）
 mkdir -p "${PPD_INSTALL_DIR}"
-unzip -j -o "${SHARP_ZIP}" "*.ppd" -d "${PPD_INSTALL_DIR}"
+unzip -j -o "${SHARP_ZIP}" "*.ppd" -d "${PPD_INSTALL_DIR}" || warn_skip "failed to extract Sharp PPD files"
 
 # 验证至少有一个 PPD 文件被安装
 PPD_COUNT=$(find "${PPD_INSTALL_DIR}" -name "*.ppd" -type f | wc -l)
 if [ "${PPD_COUNT}" -eq 0 ]; then
-    echo "[sharp] FATAL: no PPD files found after extraction"
+    echo "[sharp] WARNING: no PPD files found after extraction"
     echo "[sharp]   zip contents:"
     unzip -l "${SHARP_ZIP}" || true
-    exit 1
+    warn_skip "Sharp zip did not contain any PPD files"
 fi
 
 echo "[sharp] installed ${PPD_COUNT} PPD file(s) to ${PPD_INSTALL_DIR}:"

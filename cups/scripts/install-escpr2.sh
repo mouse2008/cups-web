@@ -25,6 +25,20 @@
 
 set -eo pipefail
 
+warn_skip() {
+    echo "[escpr2] WARNING: $1"
+    echo "[escpr2] WARNING: continuing without Epson ESC/P-R 2 proprietary driver; base printer-driver-escpr remains available"
+    exit 0
+}
+
+download_or_skip() {
+    local url="$1"
+    local output="$2"
+    if ! curl -fL --retry 5 --retry-all-errors --connect-timeout 20 --max-time 300 -o "${output}" "${url}"; then
+        warn_skip "download failed from ${url}"
+    fi
+}
+
 # ────────────────────────────────────────────────────────────────────
 # 配置
 # ────────────────────────────────────────────────────────────────────
@@ -63,7 +77,7 @@ if [ -n "${ESCPR2_DEB_URL}" ]; then
     ESCPR2_DEB_FILE="$(basename "${ESCPR2_DEB_URL}")"
     echo "[escpr2] arch=${ARCH} → installing prebuilt deb ${ESCPR2_DEB_FILE}"
     echo "[escpr2] downloading from mirror ${ESCPR2_DEB_URL}"
-    curl -fL --retry 3 --retry-delay 3 -o "${ESCPR2_DEB_FILE}" "${ESCPR2_DEB_URL}"
+    download_or_skip "${ESCPR2_DEB_URL}" "${ESCPR2_DEB_FILE}"
 
     dpkg -i "${ESCPR2_DEB_FILE}" || apt-get install -y -f --no-install-recommends
 
@@ -77,7 +91,7 @@ fi
 # ────────────────────────────────────────────────────────────────────
 echo "[escpr2] arch=${ARCH} → no prebuilt deb, building from source"
 echo "[escpr2] downloading from mirror ${ESCPR2_MIRROR_URL}"
-curl -fL --retry 3 --retry-delay 3 -o escpr2.tar.gz "${ESCPR2_MIRROR_URL}"
+download_or_skip "${ESCPR2_MIRROR_URL}" escpr2.tar.gz
 
 mkdir src
 cd src

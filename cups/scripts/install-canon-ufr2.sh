@@ -30,12 +30,20 @@
 # 不严但偶有 4xx；URL 里的 GDS 路径（/gds/0/0100009240/40/）跟随版本号
 # 变化，升级时需要去 Canon 各国家区下载页（如 https://asia.canon/en/support/0100924010）
 # 的 "Download" 按钮里抓最新 URL（点击后浏览器抓 redirect 即可）。
-# fail-fast：下载或 dpkg 任一步失败立即非零退出，避免发布镜像里缺少
-# UFR II 驱动却静默成功（与 escpr2 / epson-cn 同策略）。
+# Canon 官方下载点偶有 4xx/超时；同时 UFR II 属于可选增强驱动，不应阻塞
+# 与打印无关的部署（例如仅启用 LDAP 认证的实例）。因此这里采用 best-effort：
+# 下载 / 解包 / 安装任一步失败都打印 WARNING 并 exit 0 跳过安装。
 # 升级版本时同步更新下方 CANON_UFR2_VERSION / CANON_UFR2_DEB_VERSION /
 # CANON_UFR2_TARBALL / CANON_UFR2_URL 四个变量。
 
 set -eo pipefail
+
+warn_skip() {
+    echo "[canon-ufr2] WARNING: $*"
+    echo "[canon-ufr2] WARNING: Canon UFR II driver skipped; build continues"
+    exit 0
+}
+
 
 # ────────────────────────────────────────────────────────────────────
 # 架构判断 → 选择 tarball 内的子目录与 .deb 名
@@ -79,24 +87,24 @@ echo "[canon-ufr2] arch=${ARCH} → ${CANON_UFR2_DEB_SUBDIR}/${CANON_UFR2_DEB_NA
 echo "[canon-ufr2] downloading ${CANON_UFR2_URL}"
 wget --tries=3 --timeout=60 --retry-connrefused \
      --user-agent="${CANON_UFR2_UA}" \
-     -O "${CANON_UFR2_TARBALL}" "${CANON_UFR2_URL}"
+     -O "${CANON_UFR2_TARBALL}" "${CANON_UFR2_URL}" || warn_skip "failed to download Canon UFR II tarball"
 
 # tarball 顶层目录名跟随版本号变化（如 linux-UFRII-drv-v630-m17n/），
 # 用 --strip-components=1 把第一层目录剥掉，统一展开到 src/ 下，
 # 避免后续路径里再写一遍版本号。
 mkdir -p src
-tar xzf "${CANON_UFR2_TARBALL}" -C src --strip-components=1
+tar xzf "${CANON_UFR2_TARBALL}" -C src --strip-components=1 || warn_skip "failed to extract Canon UFR II tarball"
 
 # 用 find 兜底实际路径：Canon 偶尔会调整子目录大小写或层级，find 比
 # 硬编码 src/${SUBDIR}/${DEB} 更稳。同时也方便诊断（找不到时打印 layout）。
 DEB_PATH="$(find src -type f -name "${CANON_UFR2_DEB_NAME}" -print -quit 2>/dev/null || true)"
 
 if [ -z "${DEB_PATH}" ]; then
-    echo "[canon-ufr2] FATAL: deb file not found in tarball"
+    echo "[canon-ufr2] WARNING: deb file not found in tarball"
     echo "[canon-ufr2]   expected: ${CANON_UFR2_DEB_NAME}"
     echo "[canon-ufr2]   tarball layout:"
     find src -maxdepth 4 -type f -name "*.deb" || true
-    exit 1
+    warn_skip "expected Canon deb missing from tarball"
 fi
 
 echo "[canon-ufr2] installing ${DEB_PATH}"
@@ -108,12 +116,11 @@ echo "[canon-ufr2] installing ${DEB_PATH}"
 # 使用 --force-depends 跳过过时的依赖声明，避免 apt-get -f install
 # 把整个包回滚删除（trixie 上的实际表现——无法满足 cups-bsd 时 apt 选择
 # 删除 Canon 包来 "修复" 依赖关系）。
-dpkg -i --force-depends "${DEB_PATH}"
+dpkg -i --force-depends "${DEB_PATH}" || warn_skip "failed to install Canon UFR II deb"
 
 # 验证核心 filter 确实落盘
 if [ ! -f /usr/lib/cups/filter/rastertoufr2 ]; then
-    echo "[canon-ufr2] FATAL: /usr/lib/cups/filter/rastertoufr2 not found after dpkg install"
-    exit 1
+    warn_skip "/usr/lib/cups/filter/rastertoufr2 missing after install"
 fi
 
 echo "[canon-ufr2] installed Canon UFR II/UFRII LT driver v${CANON_UFR2_VERSION} (${CANON_UFR2_DEB_ARCH})"

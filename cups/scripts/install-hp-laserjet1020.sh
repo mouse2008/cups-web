@@ -28,7 +28,8 @@
 # ────────────────────────────────────────────────────────────────────
 # 与 install-escpr2.sh / install-konica-bizhub.sh 同模式：只从本仓库自维护的
 # GitHub Releases 镜像（tag = cups-driver）下载，避免 HP 官方下载链路在 CI 里
-# 的不稳定性。fail-fast：下载失败立即非零退出。
+# 的不稳定性。固件/派生 PPD 只影响 HP 1020 系列，不应阻塞与该机型无关的部署；
+# 因此这里采用 best-effort：固件下载或 PPD 派生失败时打印 WARNING 并继续构建。
 # 升级/替换固件：在本仓库 cups-driver release 上传新版文件，修改下方 URL。
 #
 # ────────────────────────────────────────────────────────────────────
@@ -50,6 +51,12 @@
 # 切换。
 
 set -eo pipefail
+
+warn_continue() {
+    echo "[hp-laserjet1020] WARNING: $*"
+    echo "[hp-laserjet1020] WARNING: HP 1020 optional firmware/PPD step skipped or partial; build continues"
+}
+
 
 # ────────────────────────────────────────────────────────────────────
 # 配置
@@ -87,15 +94,18 @@ PPD_SEARCH_DIRS=(
 mkdir -p "${FW_INSTALL_DIR}"
 
 echo "[hp-laserjet1020] downloading firmware from ${FW_MIRROR_URL}"
-curl -fL --retry 3 --retry-delay 3 -o "${FW_INSTALL_DIR}/${FW_FILENAME}" "${FW_MIRROR_URL}"
+if ! curl -fL --retry 3 --retry-delay 3 -o "${FW_INSTALL_DIR}/${FW_FILENAME}" "${FW_MIRROR_URL}"; then
+    rm -f "${FW_INSTALL_DIR}/${FW_FILENAME}"
+    warn_continue "failed to download firmware ${FW_FILENAME}"
+fi
 
 # 校验文件非空
 if [ ! -s "${FW_INSTALL_DIR}/${FW_FILENAME}" ]; then
-    echo "[hp-laserjet1020] FATAL: downloaded firmware file is empty"
-    exit 1
+    rm -f "${FW_INSTALL_DIR}/${FW_FILENAME}"
+    warn_continue "downloaded firmware file is empty"
+else
+    echo "[hp-laserjet1020] installed firmware: ${FW_INSTALL_DIR}/${FW_FILENAME} ($(wc -c < "${FW_INSTALL_DIR}/${FW_FILENAME}") bytes)"
 fi
-
-echo "[hp-laserjet1020] installed firmware: ${FW_INSTALL_DIR}/${FW_FILENAME} ($(wc -c < "${FW_INSTALL_DIR}/${FW_FILENAME}") bytes)"
 
 # ────────────────────────────────────────────────────────────────────
 # 派生 A4-default PPD（issue #48）
@@ -134,11 +144,11 @@ if [ -n "${PYPPD_ARCHIVE}" ]; then
     # 取第一个匹配 HP-LaserJet_1020.ppd 的 URI（双引号之间的内容）。
     PPD_URI="$("${PYPPD_ARCHIVE}" list | awk -F'"' '/HP-LaserJet_1020\.ppd/ {print $2; exit}')"
     if [ -z "${PPD_URI}" ]; then
-        echo "[hp-laserjet1020] FATAL: HP-LaserJet_1020.ppd not listed by ${PYPPD_ARCHIVE}"
-        exit 1
+        warn_continue "HP-LaserJet_1020.ppd not listed by ${PYPPD_ARCHIVE}"
+        exit 0
     fi
     echo "[hp-laserjet1020] extracting via ${PYPPD_ARCHIVE} cat ${PPD_URI}"
-    "${PYPPD_ARCHIVE}" cat "${PPD_URI}" > "${PPD_TMP}"
+    "${PYPPD_ARCHIVE}" cat "${PPD_URI}" > "${PPD_TMP}" || { warn_continue "failed to extract HP-LaserJet_1020.ppd from ${PYPPD_ARCHIVE}"; exit 0; }
 else
     PPD_SRC=""
     for dir in "${PPD_SEARCH_DIRS[@]}"; do
@@ -150,8 +160,8 @@ else
         done
     done
     if [ -z "${PPD_SRC}" ]; then
-        echo "[hp-laserjet1020] FATAL: HP-LaserJet_1020.ppd not found in pyppd archives (${PYPPD_ARCHIVES[*]}) nor in ${PPD_SEARCH_DIRS[*]}"
-        exit 1
+        warn_continue "HP-LaserJet_1020.ppd not found in archives nor fallback directories"
+        exit 0
     fi
     echo "[hp-laserjet1020] using PPD source ${PPD_SRC}"
     case "${PPD_SRC}" in
@@ -161,23 +171,23 @@ else
 fi
 
 if [ ! -s "${PPD_TMP}" ]; then
-    echo "[hp-laserjet1020] FATAL: extracted PPD is empty (foo2zjs upstream may have renamed HP-LaserJet_1020.ppd)"
-    exit 1
+    warn_continue "extracted PPD is empty (foo2zjs upstream may have renamed HP-LaserJet_1020.ppd)"
+    exit 0
 fi
 
 # 校验抽出来的 PPD 确实是 HP 1020、且 PageSize 列表里有 A4。
 # 任何一项不满足都说明 foo2zjs 上游结构变了，立即 fail-fast。
 if ! grep -q '^\*Product:[[:space:]]*"(HP LaserJet 1020)"' "${PPD_TMP}"; then
-    echo "[hp-laserjet1020] FATAL: extracted PPD doesn't look like HP LaserJet 1020"
-    exit 1
+    warn_continue "extracted PPD doesn't look like HP LaserJet 1020"
+    exit 0
 fi
 if ! grep -q '^\*PageSize A4' "${PPD_TMP}"; then
-    echo "[hp-laserjet1020] FATAL: A4 not in extracted PPD's PageSize list"
-    exit 1
+    warn_continue "A4 not in extracted PPD's PageSize list"
+    exit 0
 fi
 if ! grep -q '^\*DefaultPageSize:[[:space:]]\+Letter' "${PPD_TMP}"; then
-    echo "[hp-laserjet1020] FATAL: extracted PPD's *DefaultPageSize is not Letter (upstream may have changed defaults)"
-    exit 1
+    warn_continue "extracted PPD default page size is not Letter (upstream may have changed defaults)"
+    exit 0
 fi
 
 # 把 4 组 *Default*: Letter 改成 A4，同时改 PCFileName / ShortNickName / NickName，
@@ -197,8 +207,8 @@ sed -i -E '
 # 验证 4 组默认都改成 A4，否则说明 sed 没命中任何一行（PPD 格式变了）。
 for key in DefaultPageSize DefaultPageRegion DefaultImageableArea DefaultPaperDimension; do
     if ! grep -q "^\*${key}:[[:space:]]\+A4" "${PPD_TMP}"; then
-        echo "[hp-laserjet1020] FATAL: failed to patch *${key} to A4"
-        exit 1
+        warn_continue "failed to patch *${key} to A4"
+        exit 0
     fi
 done
 

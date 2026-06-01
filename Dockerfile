@@ -48,17 +48,22 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV MAVEN_VERSION=3.9.9
 ENV MAVEN_HOME=/opt/maven
 ENV PATH=/opt/maven/bin:$PATH
+ENV MAVEN_CONFIG=/root/.m2
 # Maven tarball 来源策略：
 # 1) 优先 dlcdn.apache.org（Apache CDN，快）—— 但它只保留 current release，
 #    一旦官方发布 3.9.10+，3.9.9 会立即 404，CI 会挂（exit code 22）。
 # 2) Fallback 到 archive.apache.org/dist/maven/...（永久归档，所有历史版本都在）。
-# 这样日常走 CDN 快，被 dlcdn 抛弃后自动用归档也能跑通，升级 Maven 时只需改 MAVEN_VERSION。
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# 3) 再 fallback 到华为云镜像，规避 archive 偶发 TLS EOF / 跨境网络抖动。
+# 同时统一开启 curl retry，降低临时网络闪断导致的构建失败概率。
+RUN apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update \
+    && apt-get install -y --fix-missing --no-install-recommends \
+         -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
       openjdk-21-jdk-headless ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && ( \
-        curl -fsSL "https://dlcdn.apache.org/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o /tmp/maven.tar.gz \
-        || curl -fsSL "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o /tmp/maven.tar.gz \
+        curl --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 20 --max-time 180 -fsSL "https://dlcdn.apache.org/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o /tmp/maven.tar.gz \
+        || curl --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 20 --max-time 180 -fsSL "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o /tmp/maven.tar.gz \
+        || curl --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 20 --max-time 180 -fsSL "https://repo.huaweicloud.com/apache/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o /tmp/maven.tar.gz \
        ) \
     && mkdir -p "${MAVEN_HOME}" \
     && tar -xzf /tmp/maven.tar.gz -C "${MAVEN_HOME}" --strip-components=1 \
@@ -66,9 +71,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && mvn -version
 WORKDIR /src/ofd-converter
 COPY ofd-converter/pom.xml ./
-RUN mvn dependency:go-offline -q
+RUN mkdir -p /root/.m2 && cat > /root/.m2/settings.xml <<'EOF'
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
+  <mirrors>
+    <mirror>
+      <id>aliyun-central</id>
+      <name>Aliyun Maven Central mirror</name>
+      <url>https://maven.aliyun.com/repository/central</url>
+      <mirrorOf>central</mirrorOf>
+    </mirror>
+  </mirrors>
+</settings>
+EOF
+RUN mvn --batch-mode --settings /root/.m2/settings.xml dependency:go-offline -DskipTests
 COPY ofd-converter/src ./src
-RUN mvn clean package -q -DskipTests
+RUN mvn --batch-mode --settings /root/.m2/settings.xml clean package -DskipTests
 
 FROM golang:1.26 AS builder
 WORKDIR /src
@@ -157,7 +176,9 @@ FROM debian:trixie-slim AS runtime
 #      | grep -E "Substituting|CIDFSubst|Loading CIDFont"
 #   - 命中 cidfmap.local 时日志出现：Substituting font <宋体> from /usr/share/fonts/...
 #   - 未命中 cidfmap.local、走第 2 层兜底时出现：substitute from .../DroidSansFallback.ttf
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update \
+    && apt-get install -y --fix-missing --no-install-recommends \
+         -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
     libreoffice-core libreoffice-writer libreoffice-calc libreoffice-impress openjdk-21-jre \
     ghostscript fonts-droid-fallback \
     fonts-dejavu-core fonts-noto-cjk fonts-arphic-uming fonts-arphic-ukai fonts-wqy-zenhei \

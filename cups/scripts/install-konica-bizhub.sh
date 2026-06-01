@@ -32,12 +32,20 @@
 # 与 install-escpr2.sh 同模式：只从仓库自维护的 GitHub Releases 镜像
 # （tag 统一为 cups-driver）下载，避免厂商 IIS / CloudFront 签名 URL
 # 在 CI 里的不稳定性（fileId 失效、URL 签名过期、TLS 指纹风控等）。
-# fail-fast：下载或 dpkg 任一步失败立即非零退出，避免发布镜像里缺少
-# 驱动却静默成功。
+# 但该专有驱动只是可选增强，不应阻塞与 Konica 无关的部署（例如只启用 LDAP
+# 认证的实例）。因此这里采用 best-effort：下载 / 解压 / 安装失败时打印
+# WARNING 并 exit 0 跳过安装。
 # 升级版本：①在本仓库 cups-driver release 上传新版 tar.gz；②修改下方
 # KM_VERSION / KM_TARBALL / KM_MIRROR_URL 三个变量。
 
 set -eo pipefail
+
+warn_skip() {
+    echo "[konica-bizhub] WARNING: $*"
+    echo "[konica-bizhub] WARNING: Konica Minolta proprietary driver skipped; build continues"
+    exit 0
+}
+
 
 # ────────────────────────────────────────────────────────────────────
 # 架构判断 → 选择 tarball 内的子目录与 .deb 名
@@ -77,26 +85,26 @@ cd "${BUILD_DIR}"
 
 echo "[konica-bizhub] arch=${ARCH} → ${KM_DEB_NAME}"
 echo "[konica-bizhub] downloading from mirror ${KM_MIRROR_URL}"
-curl -fL --retry 3 --retry-delay 3 -o "${KM_TARBALL}" "${KM_MIRROR_URL}"
+curl -fL --retry 3 --retry-delay 3 -o "${KM_TARBALL}" "${KM_MIRROR_URL}" || warn_skip "failed to download Konica tarball"
 
 mkdir -p extracted
-tar xzf "${KM_TARBALL}" -C extracted
+tar xzf "${KM_TARBALL}" -C extracted || warn_skip "failed to extract Konica tarball"
 
 # find 兜底定位 .deb：tarball 顶层目录跟随版本号变化，find 比硬编码更稳。
 DEB_PATH="$(find extracted -type f -name "${KM_DEB_NAME}" -print -quit 2>/dev/null || true)"
 
 if [ -z "${DEB_PATH}" ]; then
-    echo "[konica-bizhub] FATAL: deb file not found in tarball"
+    echo "[konica-bizhub] WARNING: deb file not found in tarball"
     echo "[konica-bizhub]   expected: ${KM_DEB_NAME}"
     echo "[konica-bizhub]   tarball layout:"
     find extracted -maxdepth 4 -type f -name "*.deb" || true
-    exit 1
+    warn_skip "expected Konica deb missing from tarball"
 fi
 
 echo "[konica-bizhub] installing ${DEB_PATH}"
 
 # dpkg -i 失败时用 apt-get -f install 兜底处理依赖（与 install-epson-cn.sh 同模式）。
-dpkg -i "${DEB_PATH}" || apt-get install -y -f --no-install-recommends
+dpkg -i "${DEB_PATH}" || apt-get install -y -f --no-install-recommends || warn_skip "failed to install Konica deb"
 
 echo "[konica-bizhub] installed Konica Minolta bizhub 3000MF driver v${KM_VERSION} (${KM_DEB_ARCH})"
 rm -rf /var/lib/apt/lists/*

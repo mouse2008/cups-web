@@ -23,6 +23,7 @@ set -euo pipefail
 # 版本来源：https://github.com/OpenPrinting/cups/releases
 CUPS_VERSION="2.4.19"
 CUPS_TARBALL_URL="https://github.com/OpenPrinting/cups/releases/download/v${CUPS_VERSION}/cups-${CUPS_VERSION}-source.tar.gz"
+CUPS_TARBALL_FALLBACK_URL="https://codeload.github.com/OpenPrinting/cups/tar.gz/refs/tags/v${CUPS_VERSION}"
 
 # ────────────────────────────────────────────────────────────────────
 # 编译 & 安装
@@ -52,7 +53,12 @@ trap 'rm -rf "${BUILD_DIR}"' EXIT
 cd "${BUILD_DIR}"
 
 echo "[cups] downloading ${CUPS_TARBALL_URL}"
-wget -q -O cups.tar.gz "${CUPS_TARBALL_URL}"
+if ! curl -fL --retry 5 --retry-all-errors --connect-timeout 20 --max-time 300 \
+    -o cups.tar.gz "${CUPS_TARBALL_URL}"; then
+  echo "[cups] primary download failed, fallback to ${CUPS_TARBALL_FALLBACK_URL}"
+  curl -fL --retry 5 --retry-all-errors --connect-timeout 20 --max-time 300 \
+    -o cups.tar.gz "${CUPS_TARBALL_FALLBACK_URL}"
+fi
 tar xzf cups.tar.gz --strip-components=1
 
 MULTIARCH="$(dpkg-architecture -qDEB_HOST_MULTIARCH)"
