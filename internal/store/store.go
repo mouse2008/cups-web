@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,6 +39,27 @@ const (
 type Store struct {
 	DB *sql.DB
 }
+
+const printerACLRulesTableDDL = `CREATE TABLE IF NOT EXISTS printer_acl_rules (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	printer_uri TEXT NOT NULL,
+	subject_type TEXT NOT NULL,
+	subject_role TEXT,
+	subject_user_id INTEGER,
+	subject_group_id INTEGER,
+	effect TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	FOREIGN KEY(subject_user_id) REFERENCES users(id) ON DELETE CASCADE,
+	FOREIGN KEY(subject_group_id) REFERENCES printer_groups(id) ON DELETE CASCADE,
+	CHECK (subject_type IN ('role', 'user', 'group')),
+	CHECK (effect IN ('allow', 'deny')),
+	CHECK (
+		(subject_type = 'role' AND subject_role IS NOT NULL AND subject_role <> '' AND subject_user_id IS NULL AND subject_group_id IS NULL) OR
+		(subject_type = 'user' AND subject_user_id IS NOT NULL AND subject_role IS NULL AND subject_group_id IS NULL) OR
+		(subject_type = 'group' AND subject_group_id IS NOT NULL AND subject_role IS NULL AND subject_user_id IS NULL)
+	)
+)`
 
 func Open(ctx context.Context, path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
@@ -124,6 +146,24 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at TEXT NOT NULL,
 			FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 		)`,
+		printerACLRulesTableDDL,
+		`CREATE TABLE IF NOT EXISTS printer_groups (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL UNIQUE,
+			description TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS printer_group_members (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			group_id INTEGER NOT NULL,
+			user_id INTEGER NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			UNIQUE(group_id, user_id),
+			FOREIGN KEY(group_id) REFERENCES printer_groups(id) ON DELETE CASCADE,
+			FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+		)`,
 	}
 
 	for _, stmt := range stmts {
@@ -155,6 +195,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := addColumnIfMissing(ctx, s.DB, "users", "last_login_at TEXT"); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
+	if err := s.ensurePrinterACLRulesSchema(ctx); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
 	indexStmts := []string{
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_ldap_uid_unique
 			ON users(ldap_uid)
@@ -162,6 +205,21 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_ldap_dn_unique
 			ON users(ldap_dn)
 			WHERE ldap_dn IS NOT NULL AND ldap_dn <> ''`,
+		`CREATE INDEX IF NOT EXISTS idx_printer_acl_rules_printer_uri
+			ON printer_acl_rules(printer_uri)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_printer_acl_rules_role_unique
+			ON printer_acl_rules(printer_uri, subject_type, subject_role, effect)
+			WHERE subject_type = 'role' AND subject_role IS NOT NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_printer_acl_rules_user_unique
+			ON printer_acl_rules(printer_uri, subject_type, subject_user_id, effect)
+			WHERE subject_type = 'user' AND subject_user_id IS NOT NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_printer_acl_rules_group_unique
+			ON printer_acl_rules(printer_uri, subject_type, subject_group_id, effect)
+			WHERE subject_type = 'group' AND subject_group_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_printer_group_members_group_id
+			ON printer_group_members(group_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_printer_group_members_user_id
+			ON printer_group_members(user_id)`,
 	}
 	for _, stmt := range indexStmts {
 		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
@@ -197,4 +255,94 @@ func addColumnIfMissing(ctx context.Context, db *sql.DB, table string, columnDef
 		return nil
 	}
 	return err
+}
+
+func (s *Store) ensurePrinterACLRulesSchema(ctx context.Context) error {
+	tableSQL, err := tableSQL(ctx, s.DB, "printer_acl_rules")
+	if err != nil {
+		return err
+	}
+	if tableSQL == "" {
+		return nil
+	}
+	if strings.Contains(tableSQL, "subject_group_id") && strings.Contains(tableSQL, "'group'") {
+		return nil
+	}
+
+	for _, indexName := range []string{
+		"idx_printer_acl_rules_printer_uri",
+		"idx_printer_acl_rules_role_unique",
+		"idx_printer_acl_rules_user_unique",
+		"idx_printer_acl_rules_group_unique",
+	} {
+		if _, err := s.DB.ExecContext(ctx, `DROP INDEX IF EXISTS `+indexName); err != nil {
+			return err
+		}
+	}
+
+	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE printer_acl_rules RENAME TO printer_acl_rules_legacy`); err != nil {
+		return err
+	}
+	if _, err := s.DB.ExecContext(ctx, printerACLRulesTableDDL); err != nil {
+		return err
+	}
+
+	subjectGroupExpr := `NULL`
+	hasGroupColumn, err := tableHasColumn(ctx, s.DB, "printer_acl_rules_legacy", "subject_group_id")
+	if err != nil {
+		return err
+	}
+	if hasGroupColumn {
+		subjectGroupExpr = `subject_group_id`
+	}
+
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO printer_acl_rules (
+		id, printer_uri, subject_type, subject_role, subject_user_id, subject_group_id, effect, created_at, updated_at
+	)
+	SELECT
+		id, printer_uri, subject_type, subject_role, subject_user_id, `+subjectGroupExpr+`, effect, created_at, updated_at
+	FROM printer_acl_rules_legacy`); err != nil {
+		return err
+	}
+
+	if _, err := s.DB.ExecContext(ctx, `DROP TABLE printer_acl_rules_legacy`); err != nil {
+		return err
+	}
+	return nil
+}
+
+func tableSQL(ctx context.Context, db *sql.DB, table string) (string, error) {
+	var sqlText sql.NullString
+	err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&sqlText)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return sqlText.String, nil
+}
+
+func tableHasColumn(ctx context.Context, db *sql.DB, table string, column string) (bool, error) {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+strconv.Quote(table)+`)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name string
+		var columnType string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }

@@ -86,6 +86,9 @@
 - **多用户系统**：支持 `admin` / `user` 两种角色
 - **默认管理员**：首次启动自动创建 `admin/admin`，`admin` 账号受保护无法被删除或重命名
 - **打印记录**：完整保存每次打印的文件、页数、份数、双面/彩色选项、状态等
+- **打印机访问控制（ACL）**：可按打印机配置 `role / group / user` 三类授权主体
+- **本地打印组**：可创建本地打印组，把多个 LDAP / 本地用户批量纳入同一授权集合
+- **单用户例外**：支持对单个用户做 allow / deny 覆盖，满足整组授权后的个别放行或禁用
 
 ### LDAP 登录与同步
 
@@ -100,6 +103,7 @@
 
 - **用户管理**：创建、编辑、删除用户；修改角色与联系信息
 - **打印记录查询**：可按用户名、时间范围过滤
+- **打印机授权管理**：管理员可维护打印组，并为每台打印机配置 `role / group / user` 级别的 allow / deny 规则
 - **数据保留策略**：按天数自动清理过期打印记录和对应文件（每小时巡检一次）
 
 ### 安全
@@ -183,13 +187,38 @@ cd cups-web
 wget https://raw.githubusercontent.com/mouse2008/cups-web/codex/ldap-user-management/docker-compose.yml
 ```
 
+### 1.1 LDAP 验收实例（1181 端口）
+
+仓库内额外提供 `docker-compose.ldap-qa.yml`，用于像当前环境这样把 LDAP 版验收实例独立发布到 `1181` 端口，避免覆盖默认 `1180` 实例：
+
+```bash
+cp .env.example .env.ldap-qa
+# 按实际情况修改 CUPSADMIN / CUPSPASSWORD
+
+docker compose --env-file .env.ldap-qa -f docker-compose.ldap-qa.yml up -d --build
+```
+
+对应目录约定：
+
+- `./.etc-ldap-qa`：1181 实例的 CUPS 配置
+- `./.data-ldap-qa`：1181 实例的 SQLite 数据
+- `./.uploads-ldap-qa`：1181 实例上传文件
+
+这样可以把 LDAP 验收环境与默认实例的 `./.etc`、`./.data`、`./.uploads` 完全隔离。
+
 ### 2. 配置环境变量
 
-在同目录创建 `.env`：
+可直接复制仓库里的模板：
+
+```bash
+cp .env.example .env
+```
+
+然后按实际情况填写：
 
 ```bash
 CUPSADMIN=admin
-CUPSPASSWORD=your_cups_password
+CUPSPASSWORD=your_c...word
 ```
 
 ### 3. 启动服务

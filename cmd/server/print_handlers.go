@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -30,18 +31,39 @@ func printHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid multipart form")
 		return
 	}
-	file, fh, err := r.FormFile("file")
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "missing file field")
-		return
-	}
-	defer file.Close()
 
 	printer := r.FormValue("printer")
 	if printer == "" {
 		writeJSONError(w, http.StatusBadRequest, "missing printer field")
 		return
 	}
+	printer, err := resolveTrustedPrinterURI(printer)
+	if err != nil {
+		if errors.Is(err, errInvalidPrinter) {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "failed to validate printer")
+		return
+	}
+	if _, allowed, err := canUsePrinter(r, printer); err != nil {
+		if errors.Is(err, errSessionUserNotFound) {
+			writeJSONError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "failed to authorize printer")
+		return
+	} else if !allowed {
+		writeJSONError(w, http.StatusForbidden, errForbiddenPrinterMessage)
+		return
+	}
+
+	file, fh, err := r.FormFile("file")
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "missing file field")
+		return
+	}
+	defer file.Close()
 
 	isDuplex := r.FormValue("duplex") == "true"
 	isColor := r.FormValue("color") == "true"

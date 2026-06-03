@@ -1,6 +1,9 @@
 .etc/
 .data
 .uploads
+.etc-ldap-qa/
+.data-ldap-qa/
+.uploads-ldap-qa/
 
 bin/
 frontend/dist/
@@ -14,6 +17,8 @@ node_modules/
 # Environment
 .env
 .env.local
+.env.*
+!.env.example
 
 # Logs and coverage
 .cache/
@@ -30,6 +35,15 @@ vendor/
 # Maven
 ofd-converter/target/
 
+# Local ops / agent scratch
 .aone_copilot/
 /.worktrees/
+.hermes/
+backups/
+handoff/
+scripts/openclaw_trigger_codex.sh
+scripts/run_codex_from_task.sh
+scripts/*.bak.*
+*.bak.*
+Dockerfile.bak.*
 

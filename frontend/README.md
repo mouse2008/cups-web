@@ -36,8 +36,17 @@ src/
 ├── router/index.js      # hash 路由 + session 守卫
 ├── views/               # LoginView / PrintView / AdminView
 ├── components/          # 业务组件
-├── utils/               # api / file / format
+├── utils/               # api / file / format / printerAcl
 └── index.css            # 全局样式
 ```
+
+## 与打印机 ACL 相关的前端约定
+
+- `PrintView` 只展示当前登录用户可见的打印机；后端 `/api/printers` 已做同样过滤，前端不是唯一防线。
+- 管理后台里的“打印机权限”支持 `role / group / user` 三类主体：
+  - `role`：按角色整组授权
+  - `group`：按本地打印组批量授权，可把多个 LDAP / 本地用户归为一组
+  - `user`：对单用户做 allow / deny 例外覆盖
+- `src/utils/printerAcl.js` 负责 ACL 规则草稿、主体标签与校验辅助逻辑；改管理员权限 UI 时优先复用它，避免把规则拼装散落在 `AdminView.vue` 各处。
 
 更详细的架构和 API 约定见仓库根目录的 [AGENTS.md](../AGENTS.md)。

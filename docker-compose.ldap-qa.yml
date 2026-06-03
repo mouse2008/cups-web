@@ -1,0 +1,31 @@
+services:
+  cups:
+    image: hanxi/cups:latest
+    user: root
+    environment:
+      - CUPSADMIN=${CUPSADMIN}
+      - CUPSPASSWORD=${CUPSPASSWORD}
+    ports:
+      - "8632:631"
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+    volumes:
+      - ./.etc-ldap-qa:/etc/cups
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mouse2008/cups-web:ldap
+    user: root
+    environment:
+      - CUPS_HOST=cups:631
+    volumes:
+      - ./.data-ldap-qa:/data
+      - ./.uploads-ldap-qa:/uploads
+    ports:
+      - "1181:8080"
+    depends_on:
+      - cups
+    restart: unless-stopped
